@@ -154,8 +154,9 @@ const AARCH64_VMWDT_SIZE: u64 = 0x1000;
 
 // Default PCI MMIO configuration region base address.
 const AARCH64_PCI_CAM_BASE_DEFAULT: u64 = 0x10000;
-// Default PCI MMIO configuration region size.
-const AARCH64_PCI_CAM_SIZE_DEFAULT: u64 = 0x1000000;
+// Default PCIe ECAM MMIO configuration region size.
+// bus-range is [0, 0], so one bus consumes 1 MiB in ECAM space.
+const AARCH64_PCI_CAM_SIZE_DEFAULT: u64 = 0x100000;
 // Default PCI mem base address.
 const AARCH64_PCI_MEM_BASE_DEFAULT: u64 = 0x2000000;
 // Default PCI mem size.
@@ -810,7 +811,7 @@ impl arch::LinuxArch for AArch64 {
                 irq_chip.as_irq_chip_mut(),
                 mmio_bus.clone(),
                 GuestAddress(arch_memory_layout.pci_cam.start),
-                8,
+                12,
                 io_bus.clone(),
                 system_allocator,
                 &mut vm,
@@ -822,7 +823,7 @@ impl arch::LinuxArch for AArch64 {
             .map_err(Error::CreatePciRoot)?;
 
         let pci_root = Arc::new(Mutex::new(pci));
-        let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci_root.clone(), 8)));
+        let pci_bus = Arc::new(Mutex::new(PciConfigMmio::new(pci_root.clone(), 12)));
         let (platform_devices, _others): (Vec<_>, Vec<_>) = others
             .into_iter()
             .partition(|(dev, _)| dev.as_platform_device().is_some());

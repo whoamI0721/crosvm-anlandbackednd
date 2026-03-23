@@ -548,7 +548,7 @@ fn create_pci_nodes(
     }
 
     let pci_node = fdt.root_mut().subnode_mut("pci")?;
-    pci_node.set_prop("compatible", "pci-host-cam-generic")?;
+    pci_node.set_prop("compatible", "pci-host-ecam-generic")?;
     pci_node.set_prop("device_type", "pci")?;
     pci_node.set_prop("ranges", ranges)?;
     pci_node.set_prop("bus-range", &bus_range)?;
