@@ -137,6 +137,7 @@ impl VmAArch64 for GunyahVm {
                 // Described by the "firmware-address" property
                 MemoryRegionPurpose::ProtectedFirmwareRegion => false,
                 MemoryRegionPurpose::ReservedMemory => false,
+                MemoryRegionPurpose::SharedFramebuffer => true,
                 MemoryRegionPurpose::StaticSwiotlbRegion => true,
             };
 

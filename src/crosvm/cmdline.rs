@@ -102,6 +102,7 @@ use crate::crosvm::config::HypervisorKind;
 use crate::crosvm::config::InputDeviceOption;
 use crate::crosvm::config::IrqChipKind;
 use crate::crosvm::config::MemOptions;
+use crate::crosvm::config::SimplefbConfig;
 use crate::crosvm::config::TouchDeviceOption;
 use crate::crosvm::config::VhostUserFrontendOption;
 use crate::crosvm::config::VhostUserFsOption;
@@ -2339,6 +2340,17 @@ pub struct RunCommand {
     /// for testing purposes.
     pub simple_media_device: Option<bool>,
 
+    #[argh(option, arg_name = "width=WIDTH,height=HEIGHT[,format=FORMAT]")]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// configure a simple framebuffer device exposed via device tree.
+    /// Allocates a shared memory region readable by the host.
+    /// Possible key values:
+    ///     width=WIDTH - framebuffer width in pixels
+    ///     height=HEIGHT - framebuffer height in pixels
+    ///     format=FORMAT - pixel format (default: a8r8g8b8)
+    pub simplefb: Option<SimplefbConfig>,
+
     #[argh(
         option,
         arg_name = "[path=]PATH[,width=WIDTH][,height=HEIGHT][,name=NAME]",
@@ -3661,6 +3673,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.battery_config = cmd.battery;
+        cfg.simplefb = cmd.simplefb;
         #[cfg(all(target_arch = "x86_64", unix))]
         {
             cfg.ac_adapter = cmd.ac_adapter.unwrap_or_default();

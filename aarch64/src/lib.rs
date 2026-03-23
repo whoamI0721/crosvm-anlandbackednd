@@ -21,6 +21,7 @@ use arch::FdtPosition;
 use arch::GetSerialCmdlineError;
 use arch::MemoryRegionConfig;
 use arch::RunnableLinuxVm;
+use arch::SimplefbParams;
 use arch::SveConfig;
 use arch::VcpuAffinity;
 use arch::VmComponents;
@@ -105,7 +106,7 @@ const AARCH64_GIC_DIST_SIZE: u64 = 0x10000;
 const AARCH64_GIC_CPUI_SIZE: u64 = 0x20000;
 
 // This indicates the start of DRAM inside the physical address space.
-const AARCH64_PHYS_MEM_START: u64 = 0x80000000;
+pub const AARCH64_PHYS_MEM_START: u64 = 0x80000000;
 const AARCH64_PLATFORM_MMIO_SIZE: u64 = 0x800000;
 
 const AARCH64_PROTECTED_VM_FW_MAX_SIZE: u64 = 0x400000;
@@ -173,6 +174,53 @@ const AARCH64_PMU_IRQ: u32 = 7;
 
 // VCPU stall detector interrupt
 const AARCH64_VMWDT_IRQ: u32 = 15;
+
+const AARCH64_SIMPLEFB_FIXED_ADDR: u64 = 0x50000000;
+
+/// Compute the page-aligned framebuffer data size for simplefb.
+fn simplefb_data_size(sfb: &arch::SimplefbParams) -> u64 {
+    let bpp: u32 = match sfb.format.as_str() {
+        "a8r8g8b8" | "x8r8g8b8" | "a8b8g8r8" => 4,
+        "r8g8b8" => 3,
+        "r5g6b5" => 2,
+        _ => 4,
+    };
+    let stride = sfb.width * bpp;
+    let size = ((stride * sfb.height) as u64);
+    (size + 0x1f_ffff) & !0x1f_ffff
+}
+
+pub fn get_simplefb_addr(
+    sfb: &arch::SimplefbParams,
+    memory_size: u64,
+    swiotlb: Option<u64>,
+    hypervisor: &(impl Hypervisor + ?Sized),
+) -> u64 {
+    if !hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+        return AARCH64_SIMPLEFB_FIXED_ADDR;
+    }
+    let swiotlb_size = swiotlb.unwrap_or(0);
+    let fb_size = simplefb_data_size(sfb);
+    let addr = AARCH64_PHYS_MEM_START + memory_size - swiotlb_size - fb_size;
+    addr & !(0x200000 - 1)
+}
+
+/// Total allocated size for the simplefb memory region, including any
+/// alignment gap between the end of framebuffer data and swiotlb.
+pub fn get_simplefb_size(
+    sfb: &arch::SimplefbParams,
+    memory_size: u64,
+    swiotlb: Option<u64>,
+    hypervisor: &(impl Hypervisor + ?Sized),
+) -> u64 {
+    if !hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+        return simplefb_data_size(sfb);
+    }
+    let swiotlb_size = swiotlb.unwrap_or(0);
+    let swiotlb_start = AARCH64_PHYS_MEM_START + memory_size - swiotlb_size;
+    let fb_addr = get_simplefb_addr(sfb, memory_size, swiotlb, hypervisor);
+    swiotlb_start - fb_addr
+}
 
 enum PayloadType {
     Bios {
@@ -389,12 +437,20 @@ fn get_vcpu_mpidr_aff<Vcpu: VcpuAArch64>(vcpus: &[Vcpu], index: usize) -> Option
 }
 
 fn main_memory_size(components: &VmComponents, hypervisor: &(impl Hypervisor + ?Sized)) -> u64 {
-    // Static swiotlb is allocated from the end of RAM as a separate memory region, so, if
-    // enabled, make the RAM memory region smaller to leave room for it.
+    // Static swiotlb and simplefb are allocated from the end of RAM as separate
+    // memory regions (for Gunyah), so make the main region smaller.
     let mut main_memory_size = components.memory_size;
-    if let Some(size) = components.swiotlb {
-        if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+    if hypervisor.check_capability(HypervisorCap::StaticSwiotlbAllocationRequired) {
+        if let Some(size) = components.swiotlb {
             main_memory_size -= size;
+        }
+        if let Some(ref sfb) = components.simplefb {
+            main_memory_size -= get_simplefb_size(
+                sfb,
+                components.memory_size,
+                components.swiotlb,
+                hypervisor,
+            );
         }
     }
     main_memory_size
@@ -481,6 +537,24 @@ impl arch::LinuxArch for AArch64 {
                     MemoryRegionOptions::new().purpose(MemoryRegionPurpose::StaticSwiotlbRegion),
                 ));
             }
+        }
+
+        // Add simplefb region as SharedFramebuffer.
+        // For Gunyah (StaticSwiotlbAllocationRequired), the region is placed at
+        // end of RAM (before swiotlb) and follows the swiotlb sharing path:
+        //   lend=false → set_user_memory_region (host keeps read access)
+        //   create_shm_node=true → Gunyah RM creates memparcel (guest gets stage-2 mapping)
+        // A reserved-memory node with no-map prevents the guest from using it as
+        // regular RAM, while allowing ioremap_wc() from the simplefb driver.
+        // For non-Gunyah, the region stays at a fixed MMIO address (0x50000000).
+        if let Some(ref sfb) = components.simplefb {
+            let fb_addr = get_simplefb_addr(sfb, components.memory_size, components.swiotlb, hypervisor);
+            let fb_alloc = get_simplefb_size(sfb, components.memory_size, components.swiotlb, hypervisor);
+            memory_regions.push((
+                GuestAddress(fb_addr),
+                fb_alloc,
+                MemoryRegionOptions::new().purpose(MemoryRegionPurpose::SharedFramebuffer),
+            ));
         }
 
         Ok(memory_regions)
@@ -949,6 +1023,31 @@ impl arch::LinuxArch for AArch64 {
             None => (None, None),
         };
 
+        // simplefb memory is mapped via guest_memory_layout() so it goes through
+        // the standard hypervisor memory initialisation path.
+        // For Gunyah: placed in RAM range, shared via set_user_memory_region + SHM node.
+        // A reserved-memory no-map node prevents the kernel from using it as regular RAM.
+        if let Some(ref sfb) = components.simplefb {
+            let fb_size_aligned = get_simplefb_size(sfb, components.memory_size, components.swiotlb, vm.get_hypervisor());
+            let fb_addr = get_simplefb_addr(sfb, components.memory_size, components.swiotlb, vm.get_hypervisor());
+            let bpp: u32 = match sfb.format.as_str() {
+                "a8r8g8b8" | "x8r8g8b8" | "a8b8g8r8" => 4,
+                "r8g8b8" => 3,
+                "r5g6b5" => 2,
+                _ => 4,
+            };
+            let stride = sfb.width * bpp;
+            base::info!(
+                "simplefb: {}x{} format={} stride={} size={:#x} guest_addr={:#x}",
+                sfb.width,
+                sfb.height,
+                sfb.format,
+                stride,
+                fb_size_aligned,
+                fb_addr,
+            );
+        }
+
         let vmwdt_cfg = fdt::VmWdtConfig {
             base: AARCH64_VMWDT_ADDR,
             size: AARCH64_VMWDT_SIZE,
@@ -986,6 +1085,25 @@ impl arch::LinuxArch for AArch64 {
             }),
             bat_mmio_base_and_irq,
             vmwdt_cfg,
+            components.simplefb.as_ref().map(|sfb| {
+                let bpp: u32 = match sfb.format.as_str() {
+                    "a8r8g8b8" | "x8r8g8b8" | "a8b8g8r8" => 4,
+                    "r8g8b8" => 3,
+                    "r5g6b5" => 2,
+                    _ => 4,
+                };
+                let stride = sfb.width * bpp;
+                let fb_addr = get_simplefb_addr(sfb, components.memory_size, components.swiotlb, vm.get_hypervisor());
+                let fb_alloc = get_simplefb_size(sfb, components.memory_size, components.swiotlb, vm.get_hypervisor());
+                fdt::SimplefbDtConfig {
+                    addr: fb_addr,
+                    size: fb_alloc,
+                    width: sfb.width,
+                    height: sfb.height,
+                    stride,
+                    format: sfb.format.clone(),
+                }
+            }),
             dump_device_tree_blob,
             &|writer, phandles| vm.create_fdt(writer, phandles),
             components.dynamic_power_coefficient,
@@ -1019,6 +1137,7 @@ impl arch::LinuxArch for AArch64 {
             rt_cpus: components.rt_cpus,
             delay_rt: components.delay_rt,
             bat_control,
+            simplefb_shm: None,
             pm: None,
             resume_notify_devices: Vec::new(),
             root_config: pci_root,

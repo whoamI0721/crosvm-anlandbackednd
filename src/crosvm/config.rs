@@ -483,6 +483,19 @@ pub struct BatteryConfig {
     pub type_: BatteryType,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SimplefbConfig {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default = "default_simplefb_format")]
+    pub format: String,
+}
+
+fn default_simplefb_format() -> String {
+    "a8r8g8b8".to_string()
+}
+
 pub fn parse_cpu_btreemap_u32(s: &str) -> Result<BTreeMap<usize, u32>, String> {
     let mut parsed_btreemap: BTreeMap<usize, u32> = BTreeMap::default();
     for cpu_pair in s.split(',') {
@@ -787,6 +800,7 @@ pub struct Config {
     pub shared_dirs: Vec<SharedDir>,
     #[cfg(feature = "media")]
     pub simple_media_device: bool,
+    pub simplefb: Option<SimplefbConfig>,
     #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
     pub slirp_capture_file: Option<String>,
     #[cfg(target_arch = "x86_64")]
@@ -1023,6 +1037,7 @@ impl Default for Config {
             shared_dirs: Vec::new(),
             #[cfg(feature = "media")]
             simple_media_device: Default::default(),
+            simplefb: None,
             #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]

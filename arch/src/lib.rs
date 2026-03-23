@@ -364,6 +364,15 @@ pub struct PciConfig {
 
 /// Holds the pieces needed to build a VM. Passed to `build_vm` in the `LinuxArch` trait below to
 /// create a `RunnableLinuxVm`.
+
+/// Simple framebuffer parameters for the guest.
+#[derive(Clone, Debug)]
+pub struct SimplefbParams {
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+}
+
 #[sorted]
 pub struct VmComponents {
     #[cfg(all(target_arch = "x86_64", unix))]
@@ -410,6 +419,7 @@ pub struct VmComponents {
     /// `hv_cfg.protection_type == ProtectionType::UnprotectedWithFirmware`.
     pub pvm_fw: Option<File>,
     pub rt_cpus: CpuSet,
+    pub simplefb: Option<SimplefbParams>,
     #[cfg(target_arch = "x86_64")]
     pub smbios: SmbiosOptions,
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -454,6 +464,7 @@ pub struct RunnableLinuxVm<V: VmArch, Vcpu: VcpuArch> {
     pub resume_notify_devices: Vec<Arc<Mutex<dyn BusResumeDevice>>>,
     pub root_config: Arc<Mutex<PciRoot>>,
     pub rt_cpus: CpuSet,
+    pub simplefb_shm: Option<base::SharedMemory>,
     pub suspend_tube: (Arc<Mutex<SendTube>>, RecvTube),
     pub vcpu_affinity: Option<VcpuAffinity>,
     pub vcpu_count: usize,

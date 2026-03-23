@@ -59,6 +59,7 @@ use crate::AARCH64_VMWDT_IRQ;
 // these.
 const PHANDLE_GIC: u32 = 1;
 const PHANDLE_RESTRICTED_DMA_POOL: u32 = 2;
+const PHANDLE_SIMPLEFB_RESERVED: u32 = 3;
 
 // CPUs are assigned phandles starting with this number.
 const PHANDLE_CPU0: u32 = 0x100;
@@ -112,6 +113,7 @@ fn create_memory_node(fdt: &mut Fdt, guest_mem: &GuestMemory) -> Result<()> {
 fn create_resv_memory_node(
     fdt: &mut Fdt,
     resv_addr_and_size: (Option<GuestAddress>, u64),
+    simplefb_cfg: Option<&SimplefbDtConfig>,
 ) -> Result<u32> {
     let (resv_addr, resv_size) = resv_addr_and_size;
 
@@ -133,6 +135,19 @@ fn create_resv_memory_node(
     restricted_dma_pool_node.set_prop("phandle", PHANDLE_RESTRICTED_DMA_POOL)?;
     restricted_dma_pool_node.set_prop("compatible", "restricted-dma-pool")?;
     restricted_dma_pool_node.set_prop("alignment", base::pagesize() as u64)?;
+
+    if let Some(sfb) = simplefb_cfg {
+        if sfb.addr >= crate::AARCH64_PHYS_MEM_START {
+            let sfb_node = fdt
+                .root_mut()
+                .subnode_mut("reserved-memory")?
+                .subnode_mut(&format!("simplefb_reserved@{:x}", sfb.addr))?;
+            sfb_node.set_prop("reg", &[sfb.addr, sfb.size])?;
+            sfb_node.set_prop("no-map", ())?;
+            sfb_node.set_prop("phandle", PHANDLE_SIMPLEFB_RESERVED)?;
+        }
+    }
+
     Ok(PHANDLE_RESTRICTED_DMA_POOL)
 }
 
@@ -593,6 +608,40 @@ fn create_battery_node(fdt: &mut Fdt, mmio_base: u64, irq: u32) -> Result<()> {
     Ok(())
 }
 
+/// Configuration for the simple framebuffer device tree node.
+pub struct SimplefbDtConfig {
+    pub addr: u64,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: String,
+}
+
+/// Creates a device tree node for a simple framebuffer (simplefb).
+///
+/// The node follows the Linux `simple-framebuffer` binding:
+///   compatible = "simple-framebuffer"
+///   reg = <addr size>
+///   width / height / stride / format
+///   status = "okay"
+fn create_simplefb_node(fdt: &mut Fdt, cfg: &SimplefbDtConfig, has_resv: bool) -> Result<()> {
+    let node_name = format!("framebuffer@{:x}", cfg.addr);
+    let reg = [cfg.addr, cfg.size];
+    let fb_node = fdt.root_mut().subnode_mut(&node_name)?;
+    fb_node.set_prop("compatible", "simple-framebuffer")?;
+    fb_node.set_prop("reg", &reg)?;
+    fb_node.set_prop("width", cfg.width)?;
+    fb_node.set_prop("height", cfg.height)?;
+    fb_node.set_prop("stride", cfg.stride)?;
+    fb_node.set_prop("format", cfg.format.as_str())?;
+    fb_node.set_prop("status", "okay")?;
+    if has_resv {
+        fb_node.set_prop("memory-region", PHANDLE_SIMPLEFB_RESERVED)?;
+    }
+    Ok(())
+}
+
 fn create_vmwdt_node(fdt: &mut Fdt, vmwdt_cfg: VmWdtConfig, num_cpus: u32) -> Result<()> {
     let vmwdt_name = format!("vmwdt@{:x}", vmwdt_cfg.base);
     let reg = [vmwdt_cfg.base, vmwdt_cfg.size];
@@ -676,6 +725,7 @@ pub fn create_fdt(
     swiotlb: Option<(Option<GuestAddress>, u64)>,
     bat_mmio_base_and_irq: Option<(u64, u32)>,
     vmwdt_cfg: VmWdtConfig,
+    simplefb_cfg: Option<SimplefbDtConfig>,
     dump_device_tree_blob: Option<PathBuf>,
     vm_generator: &impl Fn(&mut Fdt, &BTreeMap<&str, u32>) -> cros_fdt::Result<()>,
     dynamic_power_coefficient: BTreeMap<usize, u32>,
@@ -705,11 +755,28 @@ pub fn create_fdt(
     create_memory_node(&mut fdt, guest_mem)?;
     let dma_pool_phandle = match swiotlb {
         Some(x) => {
-            let phandle = create_resv_memory_node(&mut fdt, x)?;
+            let phandle = create_resv_memory_node(&mut fdt, x, simplefb_cfg.as_ref())?;
             phandles.insert("restricted_dma_reserved", phandle);
             Some(phandle)
         }
-        None => None,
+        None => {
+            // Even without swiotlb, create reserved-memory for simplefb if it's
+            // within the RAM range (protected VM case).
+            if let Some(ref sfb) = simplefb_cfg {
+                if sfb.addr >= crate::AARCH64_PHYS_MEM_START {
+                    let resv_memory_node = fdt.root_mut().subnode_mut("reserved-memory")?;
+                    resv_memory_node.set_prop("#address-cells", 0x2u32)?;
+                    resv_memory_node.set_prop("#size-cells", 0x2u32)?;
+                    resv_memory_node.set_prop("ranges", ())?;
+                    let sfb_node = resv_memory_node
+                        .subnode_mut(&format!("simplefb_reserved@{:x}", sfb.addr))?;
+                    sfb_node.set_prop("reg", &[sfb.addr, sfb.size])?;
+                    sfb_node.set_prop("no-map", ())?;
+                    sfb_node.set_prop("phandle", PHANDLE_SIMPLEFB_RESERVED)?;
+                }
+            }
+            None
+        }
     };
     create_cpu_nodes(
         &mut fdt,
@@ -731,6 +798,10 @@ pub fn create_fdt(
     create_rtc_node(&mut fdt)?;
     if let Some((bat_mmio_base, bat_irq)) = bat_mmio_base_and_irq {
         create_battery_node(&mut fdt, bat_mmio_base, bat_irq)?;
+    }
+    if let Some(ref sfb_cfg) = simplefb_cfg {
+        let has_resv = swiotlb.is_some() || sfb_cfg.addr >= crate::AARCH64_PHYS_MEM_START;
+        create_simplefb_node(&mut fdt, sfb_cfg, has_resv)?;
     }
     create_vmwdt_node(&mut fdt, vmwdt_cfg, num_cpus)?;
     create_kvm_cpufreq_node(&mut fdt)?;

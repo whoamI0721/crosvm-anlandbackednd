@@ -1533,6 +1533,11 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         no_rtc: cfg.no_rtc,
         #[cfg(target_arch = "x86_64")]
         smbios: cfg.smbios.clone(),
+        simplefb: cfg.simplefb.as_ref().map(|s| arch::SimplefbParams {
+            width: s.width,
+            height: s.height,
+            format: s.format.clone(),
+        }),
         host_cpu_topology: cfg.host_cpu_topology,
         itmt: cfg.itmt,
         #[cfg(target_arch = "x86_64")]

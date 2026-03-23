@@ -142,6 +142,10 @@ pub enum MemoryRegionPurpose {
     /// guest.
     ReservedMemory,
 
+    /// Framebuffer memory shared between host and guest (not lent in protected VM mode).
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    SharedFramebuffer,
+
     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     StaticSwiotlbRegion,
 }
@@ -178,6 +182,11 @@ pub struct MemoryRegionOptions {
     pub align: u64,
     /// Backing file params.
     pub file_backed: Option<FileBackedMappingParameters>,
+    /// When true, this region gets its own dedicated SharedMemory backing
+    /// instead of sharing the global guest memory memfd.  This is needed for
+    /// Gunyah protected VMs where mixing lend/share operations on the same
+    /// memfd causes conflicts.
+    pub isolate_backing: bool,
 }
 
 impl MemoryRegionOptions {
@@ -197,6 +206,11 @@ impl MemoryRegionOptions {
 
     pub fn file_backed(mut self, params: FileBackedMappingParameters) -> Self {
         self.file_backed = Some(params);
+        self
+    }
+
+    pub fn isolate_backing(mut self) -> Self {
+        self.isolate_backing = true;
         self
     }
 }
@@ -280,6 +294,8 @@ impl MemoryRegion {
 pub struct GuestMemory {
     regions: Arc<[MemoryRegion]>,
     locked: bool,
+    /// When true, host access to lent (non-shared) memory regions is forbidden.
+    /// Set after memory is donated to a protected VM (e.g. Gunyah).
     protected: Arc<AtomicBool>,
 }
 
@@ -300,8 +316,9 @@ impl GuestMemory {
         let mut aligned_size = 0;
         let pg_size = pagesize();
         for range in ranges {
-            if range.2.file_backed.is_some() {
-                // Regions with a backing file don't use part of the `SharedMemory`.
+            if range.2.file_backed.is_some() || range.2.isolate_backing {
+                // Regions with a backing file or isolated backing don't use
+                // part of the global `SharedMemory`.
                 continue;
             }
             if range.1 % pg_size as u64 != 0 {
@@ -366,6 +383,25 @@ impl GuestMemory {
                     guest_base: range.0,
                     shared_obj: BackingObject::File(Arc::new(file)),
                     obj_offset: file_backed.offset,
+                    options: range.2.clone(),
+                });
+            } else if range.2.isolate_backing {
+                // Create a dedicated SharedMemory for this region so its
+                // backing fd is separate from the global guest memory memfd.
+                let iso_shm = SharedMemory::new("crosvm_isolated", range.1)
+                    .map_err(Error::MemoryCreationFailed)?;
+                let iso_shm = Arc::new(iso_shm);
+                let mapping = MemoryMappingBuilder::new(size)
+                    .from_shared_memory(iso_shm.as_ref())
+                    .offset(0)
+                    .align(range.2.align)
+                    .build()
+                    .map_err(Error::MemoryMappingFailed)?;
+                regions.push(MemoryRegion {
+                    mapping,
+                    guest_base: range.0,
+                    shared_obj: BackingObject::Shm(iso_shm),
+                    obj_offset: 0,
                     options: range.2.clone(),
                 });
             } else {
@@ -440,10 +476,17 @@ impl GuestMemory {
         self.locked
     }
 
+    /// Mark this GuestMemory as belonging to a protected VM.  After this call,
+    /// any host-side access to a region whose purpose is **not**
+    /// `SharedFramebuffer` or `StaticSwiotlbRegion` will return
+    /// `Error::ProtectedMemoryAccess` instead of risking a SIGBUS.
     pub fn set_protected(&self) {
         self.protected.store(true, Ordering::Release);
     }
 
+    /// Check whether `guest_addr` falls in a host-accessible region.
+    /// Returns `Ok(())` when the access is safe, or an error describing why
+    /// the host must not touch that address.
     fn check_host_access(&self, guest_addr: GuestAddress) -> Result<()> {
         if !self.protected.load(Ordering::Acquire) {
             return Ok(());
