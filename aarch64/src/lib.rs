@@ -569,8 +569,9 @@ impl arch::LinuxArch for AArch64 {
         // The platform MMIO region is immediately past the end of RAM.
         let plat_mmio_base = vm.get_memory().end_addr().offset();
         let plat_mmio_size = AARCH64_PLATFORM_MMIO_SIZE;
-        // The high MMIO region is the rest of the address space after the platform MMIO region.
-        let high_mmio_base = plat_mmio_base + plat_mmio_size;
+        // Place the 64-bit PCI MMIO window above 4GiB so firmware does not see a
+        // single aperture that straddles the 32-bit boundary.
+        let high_mmio_base = (plat_mmio_base + plat_mmio_size).max(1u64 << 32);
         let high_mmio_size = guest_phys_end
             .checked_sub(high_mmio_base)
             .unwrap_or_else(|| {
@@ -983,9 +984,13 @@ impl arch::LinuxArch for AArch64 {
 
         let mut pci_ranges: Vec<fdt::PciRange> = Vec::new();
 
-        let mut add_pci_ranges = |alloc: &AddressAllocator, prefetchable: bool| {
+        let mut add_pci_ranges = |
+            alloc: &AddressAllocator,
+            space: fdt::PciAddressSpace,
+            prefetchable: bool,
+        | {
             pci_ranges.extend(alloc.pools().iter().map(|range| fdt::PciRange {
-                space: fdt::PciAddressSpace::Memory64,
+                space,
                 bus_address: range.start,
                 cpu_physical_address: range.start,
                 size: range.len().unwrap(),
@@ -993,8 +998,16 @@ impl arch::LinuxArch for AArch64 {
             }));
         };
 
-        add_pci_ranges(system_allocator.mmio_allocator(MmioType::Low), false);
-        add_pci_ranges(system_allocator.mmio_allocator(MmioType::High), true);
+        add_pci_ranges(
+            system_allocator.mmio_allocator(MmioType::Low),
+            fdt::PciAddressSpace::Memory,
+            false,
+        );
+        add_pci_ranges(
+            system_allocator.mmio_allocator(MmioType::High),
+            fdt::PciAddressSpace::Memory64,
+            true,
+        );
 
         let (bat_control, bat_mmio_base_and_irq) = match bat_type {
             Some(BatteryType::Goldfish) => {
