@@ -16,6 +16,8 @@ pub(crate) mod jail_warden;
 pub(crate) mod pci_hotplug_helpers;
 #[cfg(feature = "pci-hotplug")]
 pub(crate) mod pci_hotplug_manager;
+#[cfg(feature = "vnc")]
+mod simplefb_display;
 mod vcpu;
 
 #[cfg(all(feature = "pvclock", target_arch = "aarch64"))]
@@ -227,6 +229,7 @@ fn create_virtio_devices(
     #[cfg(feature = "gpu")] render_server_fd: Option<SafeDescriptor>,
     #[cfg(feature = "gpu")] has_vfio_gfx_device: bool,
     #[cfg(feature = "registered_events")] registered_evt_q: &SendTube,
+    #[cfg(feature = "vnc")] simplefb_event_devices_out: &mut Vec<EventDevice>,
 ) -> DeviceResult<Vec<VirtioDeviceStub>> {
     let mut devs = Vec::new();
 
@@ -364,6 +367,15 @@ fn create_virtio_devices(
                 event_devices.push(EventDevice::keyboard(event_device_socket));
             }
 
+            #[cfg(feature = "vnc")]
+            let event_devices = if cfg.simplefb.is_some() && cfg.vnc_server.is_some() {
+                log::info!("GPU: simplefb+VNC mode — event_devices go to simplefb bridge");
+                *simplefb_event_devices_out = event_devices;
+                Vec::new()
+            } else {
+                event_devices
+            };
+
             let (gpu_control_host_tube, gpu_control_device_tube) =
                 Tube::pair().context("failed to create gpu tube")?;
             add_control_tube(DeviceControlTube::Gpu(gpu_control_host_tube).into());
@@ -377,6 +389,54 @@ fn create_virtio_devices(
                 event_devices,
             )?);
         }
+    }
+
+    #[cfg(feature = "vnc")]
+    if cfg.gpu_parameters.is_none() && cfg.simplefb.is_some() && cfg.vnc_server.is_some() {
+        let simplefb_cfg = cfg.simplefb.as_ref().unwrap();
+        let mut event_devices = Vec::new();
+
+        if cfg.display_window_mouse {
+            let (event_device_socket, virtio_dev_socket) =
+                StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte)
+                    .context("failed to create socket")?;
+            let dev = virtio::input::new_multi_touch(
+                u32::MAX,
+                virtio_dev_socket,
+                simplefb_cfg.width,
+                simplefb_cfg.height,
+                None,
+                virtio::base_features(cfg.protection_type),
+            )
+            .context("failed to set up multi-touch device for simplefb")?;
+            devs.push(VirtioDeviceStub {
+                dev: Box::new(dev),
+                jail: simple_jail(cfg.jail_config.as_ref(), "input_device")?,
+            });
+            event_devices.push(EventDevice::touchscreen(event_device_socket));
+            log::info!("simplefb: created multi-touch event device ({}x{})", simplefb_cfg.width, simplefb_cfg.height);
+        }
+
+        if cfg.display_window_keyboard {
+            let (event_device_socket, virtio_dev_socket) =
+                StreamChannel::pair(BlockingMode::Nonblocking, FramingMode::Byte)
+                    .context("failed to create socket")?;
+            let dev = virtio::input::new_keyboard(
+                u32::MAX,
+                virtio_dev_socket,
+                virtio::base_features(cfg.protection_type),
+            )
+            .context("failed to set up keyboard device for simplefb")?;
+            devs.push(VirtioDeviceStub {
+                dev: Box::new(dev),
+                jail: simple_jail(cfg.jail_config.as_ref(), "input_device")?,
+            });
+            event_devices.push(EventDevice::keyboard(event_device_socket));
+            log::info!("simplefb: created keyboard event device");
+        }
+
+        log::info!("simplefb: total event_devices={}", event_devices.len());
+        *simplefb_event_devices_out = event_devices;
     }
 
     for (_, param) in cfg
@@ -925,6 +985,7 @@ fn create_devices(
     vfio_container_manager: &mut VfioContainerManager,
     // Stores a set of PID of child processes that are suppose to exit cleanly.
     worker_process_pids: &mut BTreeSet<Pid>,
+    #[cfg(feature = "vnc")] simplefb_event_devices_out: &mut Vec<EventDevice>,
 ) -> DeviceResult<Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)>> {
     let mut devices: Vec<(Box<dyn BusDeviceObj>, Option<Minijail>)> = Vec::new();
     #[cfg(feature = "balloon")]
@@ -1062,6 +1123,8 @@ fn create_devices(
         has_vfio_gfx_device,
         #[cfg(feature = "registered_events")]
         registered_evt_q,
+        #[cfg(feature = "vnc")]
+        simplefb_event_devices_out,
     )?;
 
     for stub in stubs {
@@ -2132,6 +2195,9 @@ where
 
     let mut worker_process_pids = BTreeSet::new();
 
+    #[cfg(feature = "vnc")]
+    let mut simplefb_event_devices: Vec<EventDevice> = Vec::new();
+
     let mut devices = create_devices(
         &cfg,
         &mut vm,
@@ -2148,6 +2214,8 @@ where
         &reg_evt_wrtube,
         &mut vfio_container_manager,
         &mut worker_process_pids,
+        #[cfg(feature = "vnc")]
+        &mut simplefb_event_devices,
     )?;
 
     #[cfg(feature = "pci-hotplug")]
@@ -2431,6 +2499,8 @@ where
         worker_process_pids,
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         vcpu_domain_paths,
+        #[cfg(feature = "vnc")]
+        simplefb_event_devices,
     )
 }
 
@@ -3542,6 +3612,7 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
         usize,
         PathBuf,
     >,
+    #[cfg(feature = "vnc")] simplefb_event_devices: Vec<EventDevice>,
 ) -> Result<ExitState> {
     // Split up `all_control_tubes`.
     #[cfg(feature = "balloon")]
@@ -3673,6 +3744,68 @@ fn run_control<V: VmArch + 'static, Vcpu: VcpuArch + 'static>(
             return Err(anyhow!("Failed to start devices thread: {}", e));
         }
     };
+
+    // If simplefb and a VNC display backend are both configured, spawn a bridge
+    // thread that polls guest memory and pushes frames to the VNC display.
+    // In protected VM mode, the simplefb region is backed by a DMA-BUF from
+    // the DMA heap and shared via map_cma_region (same as MMIO devices).
+    // The display bridge reads from the host mmap of the same DMA-BUF.
+    #[cfg(feature = "vnc")]
+    let _simplefb_display_thread = (|| -> Option<std::thread::JoinHandle<()>> {
+        let sfb_cfg = cfg.simplefb.as_ref()?;
+        let vnc_cfg = cfg.vnc_server.as_ref()?;
+        let guest_mem = linux.vm.get_memory().clone();
+        let bpp: u32 = match sfb_cfg.format.as_str() {
+            "a8r8g8b8" | "x8r8g8b8" | "a8b8g8r8" => 4,
+            "r8g8b8" => 3,
+            "r5g6b5" => 2,
+            _ => 4,
+        };
+        let stride = sfb_cfg.width * bpp;
+
+        #[cfg(target_arch = "aarch64")]
+        let (fb_size, guest_addr) = {
+            let region = guest_mem
+                .regions()
+                .find(|r| {
+                    r.options.purpose == vm_memory::MemoryRegionPurpose::SharedFramebuffer
+                })?;
+            (region.size as u64, region.guest_addr.offset())
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let (fb_size, guest_addr) = {
+            warn!("simplefb display bridge not supported on this architecture");
+            return None;
+        };
+
+        let params = simplefb_display::SimplefbDisplayParams {
+            addr: guest_addr,
+            width: sfb_cfg.width,
+            height: sfb_cfg.height,
+            stride,
+            bpp,
+            size: fb_size,
+        };
+
+        let host = vnc_cfg.host.as_deref().unwrap_or("0.0.0.0");
+        let port = vnc_cfg.port.unwrap_or(5900);
+        let addr = format!("{}:{}", host, port);
+        let target = simplefb_display::VncDisplayTarget {
+            addr,
+            password: vnc_cfg.password.clone(),
+        };
+
+        match simplefb_display::start_simplefb_display_thread(guest_mem, params, target, simplefb_event_devices) {
+            Ok(handle) => {
+                info!("simplefb display bridge started");
+                Some(handle)
+            }
+            Err(e) => {
+                error!("failed to start simplefb display bridge: {:?}", e);
+                None
+            }
+        }
+    })();
 
     let mut vcpu_handles = Vec::with_capacity(linux.vcpu_count);
     let vcpu_thread_barrier = Arc::new(Barrier::new(linux.vcpu_count + 1));

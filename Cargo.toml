@@ -239,6 +239,9 @@ android_display = ["devices/android_display"]
 # Android display backend on a non-Android target
 android_display_stub = ["devices/android_display_stub"]
 
+# Enables the VNC display backend for remote access to the VM display.
+vnc = ["devices/vnc", "gpu_display/vnc"]
+
 #! ### Video features
 #!
 #! See [Video Device](https://crosvm.dev/book/devices/video.html) for more information.
@@ -420,6 +423,7 @@ all-aarch64 = [
     "android_display_stub",
     "gunyah",
     "libaaudio_stub",
+    "vnc",
 ]
 
 ## All features that are compiled and tested for riscv64
@@ -435,7 +439,8 @@ all-x86_64 = [
     "android_display_stub",
     "libaaudio_stub",
     "plugin",
-    "scudo"
+    "scudo",
+    "vnc",
 ]
 
 ## All features that are compiled and tested for armhf
@@ -557,6 +562,7 @@ x86_64 = { path = "x86_64" }
 aarch64 = { path = "aarch64" }
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+gpu_display = { path = "gpu_display", optional = true }
 minijail = "*" # provided by ebuild
 p9 = "0.3.1"
 vhost = { path = "vhost" }

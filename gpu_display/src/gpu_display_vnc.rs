@@ -1,0 +1,383 @@
+use std::collections::VecDeque;
+use std::os::raw::c_char;
+use std::os::raw::c_int;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use base::AsRawDescriptor;
+use base::Event;
+use base::RawDescriptor;
+use base::VolatileSlice;
+use linux_input_sys::virtio_input_event;
+use vm_control::gpu::DisplayParameters;
+
+use crate::DisplayT;
+use crate::EventDeviceKind;
+use crate::GpuDisplayError;
+use crate::GpuDisplayEvents;
+use crate::GpuDisplayFramebuffer;
+use crate::GpuDisplayResult;
+use crate::GpuDisplaySurface;
+use crate::SurfaceType;
+use crate::SysDisplayT;
+
+const VNC_INPUT_NONE: c_int = 0;
+const VNC_INPUT_KEY: u8 = 1;
+const VNC_INPUT_POINTER: u8 = 2;
+
+#[repr(C)]
+#[derive(Default, Clone)]
+struct VncInputEvent {
+    event_type: u8,
+    down: u8,
+    linux_keycode: u16,
+    x: i32,
+    y: i32,
+    button_mask: u8,
+}
+
+extern "C" {
+    fn vnc_server_create(
+        width: c_int,
+        height: c_int,
+        port: c_int,
+        password: *const c_char,
+    ) -> *mut std::ffi::c_void;
+    fn vnc_server_start(server: *mut std::ffi::c_void);
+    fn vnc_server_has_input_events(server: *mut std::ffi::c_void) -> c_int;
+    fn vnc_server_resize(
+        server: *mut std::ffi::c_void,
+        width: c_int,
+        height: c_int,
+    ) -> c_int;
+    fn vnc_server_update_framebuffer(
+        server: *mut std::ffi::c_void,
+        data: *const u8,
+        size: u32,
+    );
+    fn vnc_server_destroy(server: *mut std::ffi::c_void);
+    fn vnc_server_set_input_event_fd(server: *mut std::ffi::c_void, fd: c_int);
+    fn vnc_server_poll_input_event(
+        server: *mut std::ffi::c_void,
+        out: *mut VncInputEvent,
+    ) -> c_int;
+}
+
+struct VncServerHandle {
+    ptr: *mut std::ffi::c_void,
+}
+
+unsafe impl Send for VncServerHandle {}
+unsafe impl Sync for VncServerHandle {}
+
+impl Drop for VncServerHandle {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { vnc_server_destroy(self.ptr) };
+        }
+    }
+}
+
+struct SharedFramebuffer {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+    server: Arc<VncServerHandle>,
+}
+
+struct VncSurface {
+    width: u32,
+    #[allow(dead_code)]
+    height: u32,
+    shared_fb: Arc<Mutex<SharedFramebuffer>>,
+    local_buffer: Vec<u8>,
+}
+
+impl VncSurface {
+    fn new(width: u32, height: u32, shared_fb: Arc<Mutex<SharedFramebuffer>>) -> Self {
+        let buf_size = (width as usize) * (height as usize) * 4;
+        VncSurface {
+            width,
+            height,
+            shared_fb,
+            local_buffer: vec![0u8; buf_size],
+        }
+    }
+}
+
+impl GpuDisplaySurface for VncSurface {
+    fn framebuffer(&mut self) -> Option<GpuDisplayFramebuffer> {
+        let stride = self.width * 4;
+        let buf_len = self.local_buffer.len();
+        let expected = (self.width as usize) * (self.height as usize) * 4;
+        if buf_len != expected {
+            base::error!(
+                "VNC: framebuffer size mismatch! buf={} expected={} ({}x{})",
+                buf_len, expected, self.width, self.height
+            );
+        }
+        Some(GpuDisplayFramebuffer::new(
+            VolatileSlice::new(self.local_buffer.as_mut_slice()),
+            stride,
+            4,
+        ))
+    }
+
+    fn flip(&mut self) {
+        if let Ok(mut fb) = self.shared_fb.lock() {
+            let copy_len = fb.data.len().min(self.local_buffer.len());
+            if fb.data.len() != self.local_buffer.len() {
+                base::error!(
+                    "VNC: flip size mismatch! shared_fb={} local={} copy_len={}",
+                    fb.data.len(), self.local_buffer.len(), copy_len
+                );
+            }
+            fb.data[..copy_len].copy_from_slice(&self.local_buffer[..copy_len]);
+
+            unsafe {
+                vnc_server_update_framebuffer(
+                    fb.server.ptr,
+                    fb.data.as_ptr(),
+                    copy_len as u32,
+                );
+            }
+        }
+    }
+}
+
+pub struct DisplayVnc {
+    event: Event,
+    width: u32,
+    height: u32,
+    server: Arc<VncServerHandle>,
+    shared_fb: Option<Arc<Mutex<SharedFramebuffer>>>,
+    input_queue: VecDeque<VncInputEvent>,
+    next_tracking_id: i32,
+    prev_button_mask: u8,
+}
+
+impl DisplayVnc {
+    pub fn new_tcp(
+        addr: &str,
+        width: u32,
+        height: u32,
+        password: Option<String>,
+    ) -> GpuDisplayResult<DisplayVnc> {
+        let event = Event::new().map_err(|_| GpuDisplayError::CreateEvent)?;
+
+        let port = addr
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<c_int>().ok())
+            .unwrap_or(5900);
+
+        let c_password;
+        let password_ptr = match &password {
+            Some(pwd) => {
+                c_password = std::ffi::CString::new(pwd.as_str())
+                    .map_err(|_| GpuDisplayError::Allocate)?;
+                c_password.as_ptr()
+            }
+            None => std::ptr::null(),
+        };
+
+        let server_ptr = unsafe {
+            vnc_server_create(width as c_int, height as c_int, port, password_ptr)
+        };
+        if server_ptr.is_null() {
+            base::error!("VNC server failed to start on port {}", port);
+            return Err(GpuDisplayError::Allocate);
+        }
+
+        unsafe {
+            vnc_server_set_input_event_fd(server_ptr, event.as_raw_descriptor());
+        }
+
+        unsafe { vnc_server_start(server_ptr) };
+        base::info!("VNC server started on TCP port {}", port);
+
+        let server = Arc::new(VncServerHandle { ptr: server_ptr });
+
+        Ok(DisplayVnc {
+            event,
+            width,
+            height,
+            server,
+            shared_fb: None,
+            input_queue: VecDeque::new(),
+            next_tracking_id: 0,
+            prev_button_mask: 0,
+        })
+    }
+
+    fn drain_c_events(&mut self) {
+        loop {
+            let mut ev = VncInputEvent::default();
+            let t = unsafe { vnc_server_poll_input_event(self.server.ptr, &mut ev) };
+            if t == VNC_INPUT_NONE as c_int {
+                break;
+            }
+            self.input_queue.push_back(ev);
+        }
+        let _ = self.event.wait_timeout(std::time::Duration::ZERO);
+    }
+
+    fn next_touch_tracking_id(&mut self) -> i32 {
+        let id = self.next_tracking_id;
+        self.next_tracking_id = self.next_tracking_id.wrapping_add(1);
+        id
+    }
+
+    fn current_tracking_id(&self) -> i32 {
+        self.next_tracking_id.wrapping_sub(1)
+    }
+
+    fn convert_next_event(&mut self) -> Option<GpuDisplayEvents> {
+        let ev = self.input_queue.pop_front()?;
+
+        match ev.event_type {
+            VNC_INPUT_KEY => {
+                let pressed = ev.down != 0;
+                let events = vec![virtio_input_event::key(
+                    ev.linux_keycode,
+                    pressed,
+                    false,
+                )];
+                Some(GpuDisplayEvents {
+                    events,
+                    device_type: EventDeviceKind::Keyboard,
+                })
+            }
+            VNC_INPUT_POINTER => {
+                let cur_mask = ev.button_mask;
+                let prev_mask = self.prev_button_mask;
+                self.prev_button_mask = cur_mask;
+
+                let btn1_now = cur_mask & 1;
+                let btn1_prev = prev_mask & 1;
+
+                if btn1_now != 0 && btn1_prev == 0 {
+                    let tid = self.next_touch_tracking_id();
+                    let events = vec![
+                        virtio_input_event::multitouch_slot(0),
+                        virtio_input_event::multitouch_tracking_id(tid),
+                        virtio_input_event::multitouch_absolute_x(ev.x),
+                        virtio_input_event::multitouch_absolute_y(ev.y),
+                        virtio_input_event::touch(true),
+                    ];
+                    Some(GpuDisplayEvents {
+                        events,
+                        device_type: EventDeviceKind::Touchscreen,
+                    })
+                } else if btn1_now != 0 && btn1_prev != 0 {
+                    let tid = self.current_tracking_id();
+                    let events = vec![
+                        virtio_input_event::multitouch_slot(0),
+                        virtio_input_event::multitouch_tracking_id(tid),
+                        virtio_input_event::multitouch_absolute_x(ev.x),
+                        virtio_input_event::multitouch_absolute_y(ev.y),
+                        virtio_input_event::touch(true),
+                    ];
+                    Some(GpuDisplayEvents {
+                        events,
+                        device_type: EventDeviceKind::Touchscreen,
+                    })
+                } else if btn1_now == 0 && btn1_prev != 0 {
+                    let events = vec![
+                        virtio_input_event::multitouch_slot(0),
+                        virtio_input_event::multitouch_tracking_id(-1),
+                        virtio_input_event::touch(false),
+                    ];
+                    Some(GpuDisplayEvents {
+                        events,
+                        device_type: EventDeviceKind::Touchscreen,
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl DisplayT for DisplayVnc {
+    fn pending_events(&self) -> bool {
+        !self.input_queue.is_empty()
+            || unsafe { vnc_server_has_input_events(self.server.ptr) != 0 }
+    }
+
+    fn next_event(&mut self) -> GpuDisplayResult<u64> {
+        self.drain_c_events();
+        Ok(0)
+    }
+
+    fn handle_next_event(
+        &mut self,
+        _surface: &mut Box<dyn GpuDisplaySurface>,
+    ) -> Option<GpuDisplayEvents> {
+        self.convert_next_event()
+    }
+
+    fn handle_next_event_without_surface(&mut self) -> Option<GpuDisplayEvents> {
+        self.convert_next_event()
+    }
+
+    fn create_surface(
+        &mut self,
+        parent_surface_id: Option<u32>,
+        _surface_id: u32,
+        _scanout_id: Option<u32>,
+        display_params: &DisplayParameters,
+        _surf_type: SurfaceType,
+    ) -> GpuDisplayResult<Box<dyn GpuDisplaySurface>> {
+        if parent_surface_id.is_some() {
+            return Err(GpuDisplayError::Unsupported);
+        }
+
+        let (req_w, req_h) = display_params.get_virtual_display_size();
+        let width = if req_w != 0 { req_w } else { self.width };
+        let height = if req_h != 0 { req_h } else { self.height };
+
+        if width != self.width || height != self.height {
+            base::info!(
+                "VNC: resizing from {}x{} to {}x{}",
+                self.width, self.height, width, height
+            );
+            let ret = unsafe {
+                vnc_server_resize(
+                    self.server.ptr,
+                    width as c_int,
+                    height as c_int,
+                )
+            };
+            if ret != 0 {
+                base::error!("VNC: failed to resize server");
+                return Err(GpuDisplayError::Allocate);
+            }
+            self.width = width;
+            self.height = height;
+        }
+
+        let buf_size = (width as usize) * (height as usize) * 4;
+        let shared_fb = Arc::new(Mutex::new(SharedFramebuffer {
+            width,
+            height,
+            data: vec![0u8; buf_size],
+            server: self.server.clone(),
+        }));
+
+        self.shared_fb = Some(shared_fb.clone());
+
+        base::info!("VNC: created surface {}x{}", width, height);
+        Ok(Box::new(VncSurface::new(width, height, shared_fb)))
+    }
+}
+
+impl SysDisplayT for DisplayVnc {}
+
+impl AsRawDescriptor for DisplayVnc {
+    fn as_raw_descriptor(&self) -> RawDescriptor {
+        self.event.as_raw_descriptor()
+    }
+}

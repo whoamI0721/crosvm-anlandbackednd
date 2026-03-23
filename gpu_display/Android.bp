@@ -30,6 +30,7 @@ rust_library {
     features: [
         "android_display",
         "gfxstream",
+        "vnc",
     ],
     rustlibs: [
         "libanyhow",
@@ -44,12 +45,12 @@ rust_library {
         "libzerocopy",
     ],
     proc_macros: ["libremain"],
-    static_libs: ["libdisplay_wl"],
+    static_libs: ["libdisplay_wl", "libvnc_server_bridge"],
 
     // added manually
     target: {
         host: {
-            shared_libs: ["libwayland_client"],
+            shared_libs: ["libwayland_client", "libvncserver"],
             features: ["android_display_stub"],
         },
         android: {
@@ -62,9 +63,20 @@ rust_library {
                 "libc++",
                 "libbinder_ndk",
                 "libnativewindow",
+                "libvncserver",
             ],
         },
     },
+    apex_available: ["com.android.virt"],
+}
+
+cc_library_static {
+    name: "libvnc_server_bridge",
+    host_supported: true,
+    c_std: "c11",
+    srcs: ["src/vnc_server_bridge.c"],
+    local_include_dirs: ["src"],
+    shared_libs: ["libvncserver"],
     apex_available: ["com.android.virt"],
 }
 

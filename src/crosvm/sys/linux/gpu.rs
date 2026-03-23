@@ -134,6 +134,23 @@ pub fn create_gpu_device(
         display_backends.insert(0, virtio::DisplayBackend::Android(service_name.to_string()));
     }
 
+    #[cfg(feature = "vnc")]
+    if let Some(ref vnc_cfg) = cfg.vnc_server {
+        if cfg.simplefb.is_none() {
+            let host = vnc_cfg.host.as_deref().unwrap_or("0.0.0.0");
+            let port = vnc_cfg.port.unwrap_or(5900);
+            let addr = format!("{}:{}", host, port);
+            let (w, h) = cfg
+                .display_input_width
+                .zip(cfg.display_input_height)
+                .unwrap_or((1280, 720));
+            display_backends.insert(
+                0,
+                virtio::DisplayBackend::VncTcp(addr, w, h, vnc_cfg.password.clone()),
+            );
+        }
+    }
+
     // Use the unnamed socket for GPU display screens.
     if let Some(socket_path) = cfg.wayland_socket_paths.get("") {
         display_backends.insert(

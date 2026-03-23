@@ -146,6 +146,18 @@ pub struct CpuOptions {
 }
 
 /// Device tree overlay configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, FromKeyValues)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[cfg(feature = "vnc")]
+pub struct VncConfig {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u32>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct DtboOption {
@@ -856,6 +868,8 @@ pub struct Config {
     #[cfg(feature = "audio")]
     #[serde(skip)]
     pub virtio_snds: Vec<SndParameters>,
+    #[cfg(feature = "vnc")]
+    pub vnc_server: Option<VncConfig>,
     pub vsock: Option<VsockConfig>,
     #[cfg(feature = "vtpm")]
     pub vtpm_proxy: bool,
@@ -1076,6 +1090,8 @@ impl Default for Config {
             vhost_user: Vec::new(),
             vhost_user_connect_timeout_ms: None,
             vhost_user_fs: Vec::new(),
+            #[cfg(feature = "vnc")]
+            vnc_server: None,
             vsock: None,
             #[cfg(feature = "video-decoder")]
             video_dec: Vec::new(),

@@ -15,6 +15,7 @@ android_display = []
 # Android display backend on a non-Android target
 android_display_stub = []
 gfxstream = []
+vnc = []
 
 [dependencies]
 anyhow = "1"

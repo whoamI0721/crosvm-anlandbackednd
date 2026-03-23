@@ -33,6 +33,10 @@ mod gpu_display_android;
 #[cfg(feature = "android_display_stub")]
 mod gpu_display_android_stub;
 mod gpu_display_stub;
+#[cfg(feature = "vnc")]
+mod gpu_display_vnc;
+#[cfg(feature = "vnc")]
+pub use gpu_display_vnc::DisplayVnc;
 #[cfg(windows)]
 mod gpu_display_win;
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -315,6 +319,12 @@ trait DisplayT: AsRawDescriptor {
         None
     }
 
+    /// Handles the next pending event without a surface context.  Used for input events that
+    /// can be dispatched regardless of whether a display surface exists.
+    fn handle_next_event_without_surface(&mut self) -> Option<GpuDisplayEvents> {
+        None
+    }
+
     /// Creates a surface with the given parameters.  The display backend is given a non-zero
     /// `surface_id` as a handle for subsequent operations.
     fn create_surface(
@@ -484,6 +494,27 @@ impl GpuDisplay {
         })
     }
 
+    #[cfg(feature = "vnc")]
+    pub fn open_vnc_tcp(
+        addr: &str,
+        width: u32,
+        height: u32,
+        password: Option<String>,
+    ) -> GpuDisplayResult<GpuDisplay> {
+        let display = gpu_display_vnc::DisplayVnc::new_tcp(addr, width, height, password)?;
+
+        let wait_ctx = WaitContext::new()?;
+        wait_ctx.add(&display, DisplayEventToken::Display)?;
+
+        Ok(GpuDisplay {
+            inner: Box::new(display),
+            next_id: 1,
+            event_devices: Default::default(),
+            surfaces: Default::default(),
+            wait_ctx,
+        })
+    }
+
     // Leaves the `GpuDisplay` in a undefined state.
     //
     // TODO: Would be nice to change receiver from `&mut self` to `self`. Requires some refactoring
@@ -499,12 +530,28 @@ impl GpuDisplay {
         while self.inner.pending_events() {
             let surface_descriptor = self.inner.next_event()?;
 
+            let mut matched = false;
             for surface in self.surfaces.values_mut() {
                 if surface_descriptor != surface.surface_descriptor() {
                     continue;
                 }
 
+                matched = true;
                 if let Some(gpu_display_events) = self.inner.handle_next_event(surface) {
+                    for event_device in self.event_devices.values_mut() {
+                        if event_device.kind() != gpu_display_events.device_type {
+                            continue;
+                        }
+
+                        event_device.send_report(gpu_display_events.events.iter().cloned())?;
+                    }
+                }
+            }
+
+            if !matched {
+                if let Some(gpu_display_events) =
+                    self.inner.handle_next_event_without_surface()
+                {
                     for event_device in self.event_devices.values_mut() {
                         if event_device.kind() != gpu_display_events.device_type {
                             continue;

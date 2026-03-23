@@ -1342,6 +1342,10 @@ pub enum DisplayBackend {
     /// using the name given here. The entity holding the surface is expected to locate the service
     /// via this name, and pass the surface to it.
     Android(String),
+    #[cfg(feature = "vnc")]
+    /// Start a VNC server for remote display access.
+    /// VncTcp(addr, width, height, password) listens on a TCP address.
+    VncTcp(String, u32, u32, Option<String>),
 }
 
 impl DisplayBackend {
@@ -1371,6 +1375,10 @@ impl DisplayBackend {
             },
             #[cfg(feature = "android_display")]
             DisplayBackend::Android(service_name) => GpuDisplay::open_android(service_name),
+            #[cfg(feature = "vnc")]
+            DisplayBackend::VncTcp(addr, width, height, password) => {
+                GpuDisplay::open_vnc_tcp(addr, *width, *height, password.clone())
+            }
         }
     }
 }

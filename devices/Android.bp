@@ -44,6 +44,7 @@ rust_test {
         "usb",
         "virgl_renderer",
         "virtio-media",
+        "vnc",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -146,6 +147,7 @@ rust_test {
         "usb",
         "virgl_renderer",
         "virtio-media",
+        "vnc",
     ],
     rustlibs: [
         "libacpi_tables",
@@ -244,6 +246,7 @@ rust_library {
         "usb",
         "virgl_renderer",
         "virtio-media",
+        "vnc",
     ],
     rustlibs: [
         "libacpi_tables",
