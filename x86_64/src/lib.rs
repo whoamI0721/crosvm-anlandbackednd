@@ -747,7 +747,7 @@ fn write_setup_data(
 /// Generate a SETUP_RNG_SEED SetupData with random seed data.
 fn setup_data_rng_seed() -> SetupData {
     let mut data = vec![0u8; 256];
-    OsRng.fill_bytes(&mut data);
+    rand::rng().fill_bytes(&mut data);
     SetupData {
         data,
         type_: SetupDataType::RngSeed,

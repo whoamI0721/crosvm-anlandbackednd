@@ -345,12 +345,12 @@ fn create_chosen_node(
     }
 
     let mut kaslr_seed_bytes = [0u8; 8];
-    OsRng.fill_bytes(&mut kaslr_seed_bytes);
+    rand::rng().fill_bytes(&mut kaslr_seed_bytes);
     let kaslr_seed = u64::from_le_bytes(kaslr_seed_bytes);
     chosen_node.set_prop("kaslr-seed", kaslr_seed)?;
 
     let mut rng_seed_bytes = [0u8; 256];
-    OsRng.fill_bytes(&mut rng_seed_bytes);
+    rand::rng().fill_bytes(&mut rng_seed_bytes);
     chosen_node.set_prop("rng-seed", &rng_seed_bytes)?;
 
     if let Some((initrd_addr, initrd_size)) = initrd {
