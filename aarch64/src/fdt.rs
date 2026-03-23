@@ -517,7 +517,7 @@ fn create_pci_nodes(
     let reg = [cfg.base, cfg.size];
 
     let mut interrupts: Vec<u32> = Vec::new();
-    let mut masks: Vec<u32> = Vec::new();
+    let masks = [0xf800u32, 0, 0, 0x7];
 
     for (address, irq_num, irq_pin) in pci_irqs.iter() {
         // PCI_DEVICE(3)
@@ -538,13 +538,6 @@ fn create_pci_nodes(
         interrupts.push(*irq_num);
         interrupts.push(IRQ_TYPE_LEVEL_HIGH);
 
-        // PCI_DEVICE(3)
-        masks.push(0xf800); // bits 11..15 (device)
-        masks.push(0);
-        masks.push(0);
-
-        // INT#(1)
-        masks.push(0x7); // allow INTA#-INTD# (1 | 2 | 3 | 4)
     }
 
     let pci_node = fdt.root_mut().subnode_mut("pci")?;
@@ -557,7 +550,7 @@ fn create_pci_nodes(
     pci_node.set_prop("reg", &reg)?;
     pci_node.set_prop("#interrupt-cells", 1u32)?;
     pci_node.set_prop("interrupt-map", interrupts)?;
-    pci_node.set_prop("interrupt-map-mask", masks)?;
+    pci_node.set_prop("interrupt-map-mask", &masks)?;
     pci_node.set_prop("dma-coherent", ())?;
     if let Some(dma_pool_phandle) = dma_pool_phandle {
         pci_node.set_prop("memory-region", dma_pool_phandle)?;
