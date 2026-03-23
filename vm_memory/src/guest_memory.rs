@@ -12,6 +12,8 @@ use std::io::Write;
 use std::marker::Send;
 use std::marker::Sync;
 use std::result;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -73,6 +75,8 @@ pub enum Error {
     MemoryRegionOverlap,
     #[error("memory region size {0} is too large")]
     MemoryRegionTooLarge(u128),
+    #[error("host access to lent memory region at {0} (purpose={1:?}) in protected VM")]
+    ProtectedMemoryAccess(GuestAddress, MemoryRegionPurpose),
     #[error("incomplete read of {completed} instead of {expected} bytes")]
     ShortRead { expected: usize, completed: usize },
     #[error("incomplete write of {completed} instead of {expected} bytes")]
@@ -276,6 +280,7 @@ impl MemoryRegion {
 pub struct GuestMemory {
     regions: Arc<[MemoryRegion]>,
     locked: bool,
+    protected: Arc<AtomicBool>,
 }
 
 impl AsRawDescriptors for GuestMemory {
@@ -384,6 +389,7 @@ impl GuestMemory {
         Ok(GuestMemory {
             regions: Arc::from(regions),
             locked: false,
+            protected: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -425,12 +431,35 @@ impl GuestMemory {
         Ok(GuestMemory {
             regions: Arc::from(regions),
             locked: false,
+            protected: Arc::new(AtomicBool::new(false)),
         })
     }
 
     // Whether `MemoryPolicy::LOCK_GUEST_MEMORY` was set.
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    pub fn set_protected(&self) {
+        self.protected.store(true, Ordering::Release);
+    }
+
+    fn check_host_access(&self, guest_addr: GuestAddress) -> Result<()> {
+        if !self.protected.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let region = self
+            .regions
+            .iter()
+            .find(|r| r.contains(guest_addr))
+            .ok_or(Error::InvalidGuestAddress(guest_addr))?;
+        match region.options.purpose {
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            MemoryRegionPurpose::SharedFramebuffer => Ok(()),
+            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+            MemoryRegionPurpose::StaticSwiotlbRegion => Ok(()),
+            other => Err(Error::ProtectedMemoryAccess(guest_addr, other)),
+        }
     }
 
     /// Returns the end address of memory.
@@ -555,6 +584,7 @@ impl GuestMemory {
     /// # }
     /// ```
     pub fn write_at_addr(&self, buf: &[u8], guest_addr: GuestAddress) -> Result<usize> {
+        self.check_host_access(guest_addr)?;
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .write_slice(buf, offset)
@@ -613,6 +643,7 @@ impl GuestMemory {
     /// # }
     /// ```
     pub fn read_at_addr(&self, buf: &mut [u8], guest_addr: GuestAddress) -> Result<usize> {
+        self.check_host_access(guest_addr)?;
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .read_slice(buf, offset)
@@ -668,6 +699,7 @@ impl GuestMemory {
     /// # }
     /// ```
     pub fn read_obj_from_addr<T: FromBytes>(&self, guest_addr: GuestAddress) -> Result<T> {
+        self.check_host_access(guest_addr)?;
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .read_obj(offset)
@@ -699,6 +731,7 @@ impl GuestMemory {
     /// # }
     /// ```
     pub fn read_obj_from_addr_volatile<T: FromBytes>(&self, guest_addr: GuestAddress) -> Result<T> {
+        self.check_host_access(guest_addr)?;
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .read_obj_volatile(offset)
@@ -725,6 +758,7 @@ impl GuestMemory {
         val: T,
         guest_addr: GuestAddress,
     ) -> Result<()> {
+        self.check_host_access(guest_addr)?;
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .write_obj(val, offset)
@@ -754,6 +788,7 @@ impl GuestMemory {
         val: T,
         guest_addr: GuestAddress,
     ) -> Result<()> {
+        self.check_host_access(guest_addr)?;
         let (mapping, offset, _) = self.find_region(guest_addr)?;
         mapping
             .write_obj_volatile(val, offset)
@@ -778,6 +813,7 @@ impl GuestMemory {
     /// # }
     /// ```
     pub fn get_slice_at_addr(&self, addr: GuestAddress, len: usize) -> Result<VolatileSlice> {
+        self.check_host_access(addr)?;
         self.regions
             .iter()
             .find(|region| region.contains(addr))

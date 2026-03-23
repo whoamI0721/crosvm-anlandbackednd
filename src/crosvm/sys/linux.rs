@@ -2333,6 +2333,10 @@ where
     )
     .context("the architecture failed to build the vm")?;
 
+    if cfg.protection_type.isolates_memory() {
+        linux.vm.get_memory().set_protected();
+    }
+
     for tube in linux.vm_request_tubes.drain(..) {
         add_control_tube(TaggedControlTube::Vm(tube).into());
     }

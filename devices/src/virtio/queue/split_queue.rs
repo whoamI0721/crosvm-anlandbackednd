@@ -152,10 +152,16 @@ impl SplitQueue {
         //
         // So, we read the value from guest memory.
         let used_index_addr = self.used_ring.unchecked_add(2);
-        self.next_used = self
+        self.next_used = match self
             .mem
             .read_obj_from_addr_volatile(used_index_addr)
-            .unwrap();
+        {
+            Ok(idx) => idx,
+            Err(e) => {
+                error!("vhost_user_reclaim: failed to read used index: {}", e);
+                Wrapping(0)
+            }
+        };
 
         // Since the backend has not told us what its actual last_used value
         // was, we have to assume that an interrupt must be sent when next
@@ -253,12 +259,14 @@ impl SplitQueue {
         fence(Ordering::SeqCst);
 
         let avail_index_addr = self.avail_ring.unchecked_add(2);
-        let avail_index: u16 = self
-            .mem
-            .read_obj_from_addr_volatile(avail_index_addr)
-            .unwrap();
-
-        Wrapping(avail_index)
+        match self.mem.read_obj_from_addr_volatile(avail_index_addr) {
+            Ok(avail_index) => Wrapping(avail_index),
+            Err(e) => {
+                error!("get_avail_index: {}", e);
+                // Return current next_avail so the queue appears empty.
+                self.next_avail
+            }
+        }
     }
 
     // Set the `avail_event` field in the used ring.
@@ -271,9 +279,12 @@ impl SplitQueue {
         fence(Ordering::SeqCst);
 
         let avail_event_addr = self.used_ring.unchecked_add(4 + 8 * u64::from(self.size));
-        self.mem
+        if let Err(e) = self
+            .mem
             .write_obj_at_addr_volatile(avail_index.0, avail_event_addr)
-            .unwrap();
+        {
+            error!("set_avail_event: {}", e);
+        }
     }
 
     // Query the value of a single-bit flag in the available ring.
@@ -282,12 +293,13 @@ impl SplitQueue {
     fn get_avail_flag(&self, flag: u16) -> bool {
         fence(Ordering::SeqCst);
 
-        let avail_flags: u16 = self
-            .mem
-            .read_obj_from_addr_volatile(self.avail_ring)
-            .unwrap();
-
-        avail_flags & flag == flag
+        match self.mem.read_obj_from_addr_volatile::<u16>(self.avail_ring) {
+            Ok(avail_flags) => avail_flags & flag == flag,
+            Err(e) => {
+                error!("get_avail_flag: {}", e);
+                false
+            }
+        }
     }
 
     // Get the `used_event` field in the available ring.
@@ -301,12 +313,13 @@ impl SplitQueue {
         fence(Ordering::SeqCst);
 
         let used_event_addr = self.avail_ring.unchecked_add(4 + 2 * u64::from(self.size));
-        let used_event: u16 = self
-            .mem
-            .read_obj_from_addr_volatile(used_event_addr)
-            .unwrap();
-
-        Wrapping(used_event)
+        match self.mem.read_obj_from_addr_volatile(used_event_addr) {
+            Ok(used_event) => Wrapping(used_event),
+            Err(e) => {
+                error!("get_used_event: {}", e);
+                Wrapping(0)
+            }
+        }
     }
 
     // Set the `idx` field in the used ring.
@@ -317,9 +330,12 @@ impl SplitQueue {
         fence(Ordering::SeqCst);
 
         let used_index_addr = self.used_ring.unchecked_add(2);
-        self.mem
+        if let Err(e) = self
+            .mem
             .write_obj_at_addr_volatile(used_index.0, used_index_addr)
-            .unwrap();
+        {
+            error!("set_used_index: {}", e);
+        }
     }
 
     /// Get the first available descriptor chain without removing it from the queue.
@@ -339,7 +355,13 @@ impl SplitQueue {
         let desc_idx_addr = self.avail_ring.checked_add(desc_idx_addr_offset)?;
 
         // This index is checked below in checked_new.
-        let descriptor_index: u16 = self.mem.read_obj_from_addr_volatile(desc_idx_addr).unwrap();
+        let descriptor_index: u16 = match self.mem.read_obj_from_addr_volatile(desc_idx_addr) {
+            Ok(idx) => idx,
+            Err(e) => {
+                error!("peek: failed to read descriptor index: {}", e);
+                return None;
+            }
+        };
 
         let chain =
             SplitDescriptorChain::new(&self.mem, self.desc_table, self.size, descriptor_index);
@@ -375,10 +397,10 @@ impl SplitQueue {
             len: Le32::from(len),
         };
 
-        // This write can't fail as we are guaranteed to be within the descriptor ring.
-        self.mem
-            .write_obj_at_addr_volatile(elem, used_elem)
-            .unwrap();
+        if let Err(e) = self.mem.write_obj_at_addr_volatile(elem, used_elem) {
+            error!("add_used: failed to write used element: {}", e);
+            return;
+        }
 
         self.next_used += Wrapping(1);
         self.set_used_index(self.next_used);
