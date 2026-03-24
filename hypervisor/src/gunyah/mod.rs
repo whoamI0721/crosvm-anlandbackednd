@@ -276,6 +276,13 @@ impl GunyahVm {
                         region.shm_offset,
                 )?;
             } else if lend {
+                unsafe {
+                    libc::madvise(
+                        region.host_addr as *mut libc::c_void,
+                        region.size,
+                        libc::MADV_HUGEPAGE,
+                    );
+                }
                 // SAFETY:
                 // Safe because the guest regions are guarnteed not to overlap.
                 unsafe {
