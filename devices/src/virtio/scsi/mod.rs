@@ -23,6 +23,20 @@ fn scsi_option_block_size_default() -> u32 {
     512
 }
 
+fn scsi_option_type_default() -> ScsiDeviceType {
+    ScsiDeviceType::Disk
+}
+
+/// SCSI device type for an emulated target.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScsiDeviceType {
+    /// A regular direct-access disk device.
+    Disk,
+    /// A CD-ROM optical device.
+    Cdrom,
+}
+
 /// Parameters for setting up a SCSI device.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, serde_keyvalue::FromKeyValues)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -38,6 +52,9 @@ pub struct ScsiOption {
     // The block size of the device.
     #[serde(default = "scsi_option_block_size_default")]
     pub block_size: u32,
+    /// Type of the emulated SCSI target.
+    #[serde(default = "scsi_option_type_default", rename = "type")]
+    pub type_: ScsiDeviceType,
     /// Whether this scsi device should be the root device. Can only be set once. Only useful for
     /// adding specific command-line options.
     #[serde(default)]
@@ -62,6 +79,7 @@ mod tests {
                 read_only: false,
                 lock: scsi_option_lock_default(),
                 block_size: 512,
+                type_: ScsiDeviceType::Disk,
                 root: false,
             }
         );
@@ -74,6 +92,7 @@ mod tests {
                 read_only: true,
                 lock: scsi_option_lock_default(),
                 block_size: 512,
+                type_: ScsiDeviceType::Disk,
                 root: false,
             }
         );
@@ -86,6 +105,7 @@ mod tests {
                 read_only: false,
                 lock: scsi_option_lock_default(),
                 block_size: 1024,
+                type_: ScsiDeviceType::Disk,
                 root: false,
             }
         );
@@ -99,7 +119,21 @@ mod tests {
                 read_only: false,
                 lock: scsi_option_lock_default(),
                 block_size: 1024,
+                type_: ScsiDeviceType::Disk,
                 root: true,
+            }
+        );
+
+        let scsi_option = from_key_values::<ScsiOption>("/path/to/image,type=cdrom").unwrap();
+        assert_eq!(
+            scsi_option,
+            ScsiOption {
+                path: Path::new("/path/to/image").to_path_buf(),
+                read_only: false,
+                lock: scsi_option_lock_default(),
+                block_size: 512,
+                type_: ScsiDeviceType::Cdrom,
+                root: false,
             }
         );
     }

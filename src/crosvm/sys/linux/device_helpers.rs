@@ -379,6 +379,7 @@ impl<'a> VirtioDeviceBuilder for &'a ScsiConfig<'a> {
                     file,
                     block_size: op.block_size,
                     read_only: op.read_only,
+                    device_type: op.type_,
                 })
             })
             .collect::<anyhow::Result<_>>()?;

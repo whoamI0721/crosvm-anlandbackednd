@@ -58,6 +58,8 @@ pub const CHECK_CONDITION: u8 = 0x02;
 // Device Types
 /// Indicates the id of disk type.
 pub const TYPE_DISK: u8 = 0x00;
+/// Indicates the id of cdrom type.
+pub const TYPE_CDROM: u8 = 0x05;
 
 // SENSE KEYS
 /// Indicates that there is no specific sense data to be reported.

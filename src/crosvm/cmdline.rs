@@ -2176,6 +2176,8 @@ pub struct RunCommand {
     ///         without the key as the first argument.
     ///     block_size=BYTES - Set the reported block size of the
     ///        disk (default: 512)
+    ///     type=(disk,cdrom) - Emulated SCSI device type.
+    ///        (default: disk)
     ///     ro=BOOL - Whether the block should be read-only.
     ///         (default: false)
     ///     root=BOOL - Whether the scsi device should be mounted

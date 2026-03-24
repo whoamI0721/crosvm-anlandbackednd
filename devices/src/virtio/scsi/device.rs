@@ -62,6 +62,7 @@ use crate::virtio::scsi::constants::CHECK_CONDITION;
 use crate::virtio::scsi::constants::GOOD;
 use crate::virtio::scsi::constants::ILLEGAL_REQUEST;
 use crate::virtio::scsi::constants::MEDIUM_ERROR;
+use crate::virtio::scsi::ScsiDeviceType;
 use crate::virtio::DescriptorChain;
 use crate::virtio::DeviceType as VirtioDeviceType;
 use crate::virtio::Interrupt;
@@ -304,6 +305,7 @@ struct LogicalUnit {
     /// Block size of the target device.
     block_size: u32,
     read_only: bool,
+    device_type: ScsiDeviceType,
     // Represents the image on disk.
     disk_image: Box<dyn DiskFile>,
 }
@@ -318,6 +320,7 @@ impl LogicalUnit {
             max_lba: self.max_lba,
             block_size: self.block_size,
             read_only: self.read_only,
+            device_type: self.device_type,
             disk_image,
         })
     }
@@ -328,6 +331,7 @@ pub struct AsyncLogicalUnit {
     pub max_lba: u64,
     pub block_size: u32,
     pub read_only: bool,
+    pub device_type: ScsiDeviceType,
     // Represents the async image on disk.
     pub disk_image: Box<dyn AsyncDisk>,
 }
@@ -349,6 +353,7 @@ impl Targets {
                         max_lba: logical_unit.max_lba,
                         block_size: logical_unit.block_size,
                         read_only: logical_unit.read_only,
+                        device_type: logical_unit.device_type,
                     },
                 ))
             })
@@ -369,6 +374,8 @@ pub struct DiskConfig {
     pub block_size: u32,
     /// Indicates whether the SCSI disk is read only.
     pub read_only: bool,
+    /// Type of the emulated SCSI target.
+    pub device_type: ScsiDeviceType,
 }
 
 /// Vitio device for exposing SCSI command operations on a host file.
@@ -413,7 +420,8 @@ impl Controller {
                 let target = LogicalUnit {
                     max_lba,
                     block_size: disk.block_size,
-                    read_only: disk.read_only,
+                    read_only: disk.read_only || disk.device_type == ScsiDeviceType::Cdrom,
+                    device_type: disk.device_type,
                     disk_image: disk.file,
                 };
                 Ok((i as TargetId, target))

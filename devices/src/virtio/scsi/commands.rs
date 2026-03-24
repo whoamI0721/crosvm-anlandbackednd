@@ -28,6 +28,7 @@ use crate::virtio::scsi::constants::REPORT_SUPPORTED_TASK_MANAGEMENT_FUNCTIONS;
 use crate::virtio::scsi::constants::SERVICE_ACTION_IN_16;
 use crate::virtio::scsi::constants::SYNCHRONIZE_CACHE_10;
 use crate::virtio::scsi::constants::TEST_UNIT_READY;
+use crate::virtio::scsi::constants::TYPE_CDROM;
 use crate::virtio::scsi::constants::TYPE_DISK;
 use crate::virtio::scsi::constants::UNMAP;
 use crate::virtio::scsi::constants::WRITE_10;
@@ -272,10 +273,14 @@ impl Inquiry {
         }
         let alloc_len = self.alloc_len();
         let mut outbuf = vec![0u8; cmp::max(writer.available_bytes(), alloc_len)];
+        let (peripheral, removable, product_id) = match dev.device_type {
+            ScsiDeviceType::Disk => (TYPE_DISK, 0x00, "CROSVM HARDDISK"),
+            ScsiDeviceType::Cdrom => (TYPE_CDROM, 0x80, "CROSVM CD-ROM"),
+        };
         // Peripheral
-        outbuf[0] = TYPE_DISK;
-        // Removable bit. We currently do not support removable SCSI devices.
-        outbuf[1] = 0x0;
+        outbuf[0] = peripheral;
+        // Removable bit
+        outbuf[1] = removable;
         // Version 0x5 indicates that the device complies to SPC-3.
         outbuf[2] = 0x5;
         // Hierarchical Support | Response Data Format
@@ -293,7 +298,7 @@ impl Inquiry {
         // Vendor
         Self::fill_left_aligned_ascii(&mut outbuf[8..16], "CROSVM");
         // Product ID
-        Self::fill_left_aligned_ascii(&mut outbuf[16..32], "CROSVM HARDDISK");
+        Self::fill_left_aligned_ascii(&mut outbuf[16..32], product_id);
         // Product revision level
         Self::fill_left_aligned_ascii(&mut outbuf[32..36], "0.1");
 
@@ -310,7 +315,10 @@ impl Inquiry {
         let alloc_len = self.alloc_len();
         let mut outbuf = vec![0u8; cmp::max(4096, alloc_len)];
         // Peripheral
-        outbuf[0] = TYPE_DISK;
+        outbuf[0] = match dev.device_type {
+            ScsiDeviceType::Disk => TYPE_DISK,
+            ScsiDeviceType::Cdrom => TYPE_CDROM,
+        };
         let page_code = self.page_code();
         outbuf[1] = page_code;
         match page_code {
