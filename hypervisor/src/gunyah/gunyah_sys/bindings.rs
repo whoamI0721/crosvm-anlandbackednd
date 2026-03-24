@@ -22,6 +22,7 @@ pub const GH_VM_MAX_EXIT_REASON_SIZE: u32 = 8;
 pub const GH_VCPU_EXIT_UNKNOWN: u32 = 0;
 pub const GH_VCPU_EXIT_MMIO: u32 = 1;
 pub const GH_VCPU_EXIT_STATUS: u32 = 2;
+pub const GH_VCPU_EXIT_PAGE_FAULT: u32 = 3;
 pub const GH_ANDROID_IOCTL_TYPE: u8 = 65u8;
 pub const GH_VM_BOOT_CONTEXT_REG_SHIFT: u32 = 8;
 pub type i8 = :: std :: os :: raw :: c_schar;
@@ -144,6 +145,7 @@ pub struct gh_vcpu_run {
 pub union gh_vcpu_run__bindgen_ty_1 {
     pub mmio: gh_vcpu_run__bindgen_ty_1__bindgen_ty_1,
     pub status: gh_vcpu_run__bindgen_ty_1__bindgen_ty_2,
+    pub page_fault: gh_vcpu_run__bindgen_ty_1__bindgen_ty_3,
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -158,6 +160,13 @@ pub struct gh_vcpu_run__bindgen_ty_1__bindgen_ty_1 {
 pub struct gh_vcpu_run__bindgen_ty_1__bindgen_ty_2 {
     pub status: gh_vm_status,
     pub exit_info: gh_vm_exit_info,
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct gh_vcpu_run__bindgen_ty_1__bindgen_ty_3 {
+    pub phys_addr: u64,
+    pub attempt: i32,
+    pub resume_action: u8,
 }
 impl Default for gh_vcpu_run__bindgen_ty_1__bindgen_ty_2 {
     fn default() -> Self {

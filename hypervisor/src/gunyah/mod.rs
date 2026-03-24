@@ -936,6 +936,11 @@ impl Vcpu for GunyahVcpu {
                     }
                 }
             }
+            GH_VCPU_EXIT_PAGE_FAULT => {
+                let pf = unsafe { &run.__bindgen_anon_1.page_fault };
+                warn!("page fault at {:#x}, attempt: {}", pf.phys_addr, pf.attempt);
+                Err(Error::new(-pf.attempt))
+            }
             r => {
                 warn!("unknown gh exit reason: {}", r);
                 Err(Error::new(EINVAL))
