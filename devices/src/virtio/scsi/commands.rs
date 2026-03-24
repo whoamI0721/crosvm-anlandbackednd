@@ -23,6 +23,7 @@ use crate::virtio::scsi::constants::READ_10;
 use crate::virtio::scsi::constants::READ_6;
 use crate::virtio::scsi::constants::READ_CAPACITY_10;
 use crate::virtio::scsi::constants::READ_CAPACITY_16;
+use crate::virtio::scsi::constants::REQUEST_SENSE;
 use crate::virtio::scsi::constants::REPORT_LUNS;
 use crate::virtio::scsi::constants::REPORT_SUPPORTED_TASK_MANAGEMENT_FUNCTIONS;
 use crate::virtio::scsi::constants::SERVICE_ACTION_IN_16;
@@ -34,6 +35,7 @@ use crate::virtio::scsi::constants::UNMAP;
 use crate::virtio::scsi::constants::WRITE_10;
 use crate::virtio::scsi::constants::WRITE_SAME_10;
 use crate::virtio::scsi::constants::WRITE_SAME_16;
+use crate::virtio::scsi::ScsiDeviceType;
 use crate::virtio::scsi::device::AsyncLogicalUnit;
 use crate::virtio::scsi::device::ExecuteError;
 use crate::virtio::Reader;
@@ -42,6 +44,7 @@ use crate::virtio::Writer;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     TestUnitReady(TestUnitReady),
+    RequestSense(RequestSense),
     Read6(Read6),
     Inquiry(Inquiry),
     ModeSelect6(ModeSelect6),
@@ -63,6 +66,7 @@ impl Command {
         let op = cdb[0];
         match op {
             TEST_UNIT_READY => Ok(Self::TestUnitReady(Self::parse_command(cdb)?)),
+            REQUEST_SENSE => Ok(Self::RequestSense(Self::parse_command(cdb)?)),
             READ_6 => Ok(Self::Read6(Self::parse_command(cdb)?)),
             INQUIRY => Ok(Self::Inquiry(Self::parse_command(cdb)?)),
             MODE_SELECT_6 => Ok(Self::ModeSelect6(Self::parse_command(cdb)?)),
@@ -129,6 +133,7 @@ impl Command {
     ) -> Result<(), ExecuteError> {
         match self {
             Self::TestUnitReady(_) => Ok(()), // noop as the device is ready.
+            Self::RequestSense(request_sense) => request_sense.emulate(writer),
             Self::Read6(read6) => read6.emulate(writer, dev).await,
             Self::Inquiry(inquiry) => inquiry.emulate(writer, dev),
             Self::ModeSelect6(mode_select_6) => mode_select_6.emulate(reader, dev),
@@ -159,6 +164,48 @@ pub struct TestUnitReady {
     opcode: u8,
     reserved: [u8; 4],
     control: u8,
+}
+
+#[derive(
+    Copy, Clone, Debug, Default, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq, Eq,
+)]
+#[repr(C, packed)]
+pub struct RequestSense {
+    opcode: u8,
+    desc_field: u8,
+    _reserved: [u8; 2],
+    alloc_len_byte: u8,
+    control: u8,
+}
+
+impl RequestSense {
+    fn descriptor_format(&self) -> bool {
+        self.desc_field & 0x1 != 0
+    }
+
+    fn alloc_len(&self) -> usize {
+        self.alloc_len_byte as usize
+    }
+
+    fn emulate(&self, writer: &mut Writer) -> Result<(), ExecuteError> {
+        // crosvm currently only supports fixed format sense data.
+        if self.descriptor_format() {
+            return Err(ExecuteError::InvalidField);
+        }
+
+        let alloc_len = self.alloc_len();
+        let mut outbuf = [0u8; 18];
+        // Fixed format, current errors.
+        outbuf[0] = 0x70;
+        // Sense key: NO SENSE.
+        outbuf[2] = 0x00;
+        // Additional sense length for fixed format (18-byte sense => 10).
+        outbuf[7] = 10;
+
+        writer
+            .write_all(&outbuf[..cmp::min(alloc_len, outbuf.len())])
+            .map_err(ExecuteError::Write)
+    }
 }
 
 fn check_lba_range(max_lba: u64, sector_num: u64, sector_len: usize) -> Result<(), ExecuteError> {
@@ -1206,6 +1253,18 @@ mod tests {
         };
         assert_eq!(read6.xfer_len(), 256);
         assert_eq!(read6.lba(), 0x0bcdef);
+    }
+
+    #[test]
+    fn parse_request_sense() {
+        let cdb = [0x03, 0x00, 0x00, 0x00, 0x12, 0x00];
+        let command = Command::new(&cdb).unwrap();
+        let request_sense = match command {
+            Command::RequestSense(r) => r,
+            _ => panic!("unexpected command type: {:?}", command),
+        };
+        assert!(!request_sense.descriptor_format());
+        assert_eq!(request_sense.alloc_len(), 0x12);
     }
 
     #[test]
