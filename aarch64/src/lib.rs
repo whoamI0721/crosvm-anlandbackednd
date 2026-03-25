@@ -61,6 +61,7 @@ use hypervisor::CpuConfigAArch64;
 use hypervisor::DeviceKind;
 use hypervisor::Hypervisor;
 use hypervisor::HypervisorCap;
+use hypervisor::HypervisorKind;
 use hypervisor::MemCacheType;
 use hypervisor::ProtectionType;
 use hypervisor::VcpuAArch64;
@@ -1124,6 +1125,7 @@ impl arch::LinuxArch for AArch64 {
             device_tree_overlays,
             &serial_devices,
             components.virt_cpufreq_v2,
+            matches!(vm.hypervisor_kind(), HypervisorKind::Kvm),
         )
         .map_err(Error::CreateFdt)?;
 

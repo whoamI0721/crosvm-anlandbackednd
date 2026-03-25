@@ -725,6 +725,7 @@ pub fn create_fdt(
     device_tree_overlays: Vec<DtbOverlay>,
     serial_devices: &[SerialDeviceInfo],
     virt_cpufreq_v2: bool,
+    is_kvm: bool,
 ) -> Result<()> {
     let mut fdt = Fdt::new(&[]);
     let mut phandles_key_cache = Vec::new();
@@ -797,7 +798,9 @@ pub fn create_fdt(
         create_simplefb_node(&mut fdt, sfb_cfg, has_resv)?;
     }
     create_vmwdt_node(&mut fdt, vmwdt_cfg, num_cpus)?;
-    create_kvm_cpufreq_node(&mut fdt)?;
+    if is_kvm {
+        create_kvm_cpufreq_node(&mut fdt)?;
+    }
     vm_generator(&mut fdt, &phandles)?;
     if !cpu_frequencies.is_empty() {
         if virt_cpufreq_v2 {
