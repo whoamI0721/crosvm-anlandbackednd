@@ -654,8 +654,9 @@ pub fn kick_all_vcpus(
     message: VcpuControl,
 ) {
     for (handle, tube) in vcpu_handles {
-        if let Err(e) = tube.send(message.clone()) {
-            error!("failed to send VcpuControl: {}", e);
+        match tube.send(message.clone()) {
+            Ok(()) => {}
+            Err(_) => info!("VcpuControl channel already closed, vcpu thread likely exited"),
         }
         let _ = handle.kill(SIGRTMIN() + 0);
     }
