@@ -5,10 +5,12 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use base::error;
 use base::warn;
+use base::info;
 use base::AsRawDescriptor;
 use base::Error as SysError;
 use base::RawDescriptor;
@@ -119,12 +121,14 @@ pub struct Fs {
     cfg: virtio_fs_config,
     tag: String,
     fs: Option<PassthroughFs>,
+    server: Option<Arc<Server<PassthroughFs>>>,
     queue_sizes: Box<[u16]>,
     avail_features: u64,
     acked_features: u64,
     use_dax: bool,
     pci_bar: Option<Alloc>,
     tube: Option<Tube>,
+    socket: Option<Arc<Mutex<Tube>>>,
     workers: Vec<WorkerThread<Result<()>>>,
 }
 
@@ -160,12 +164,14 @@ impl Fs {
             cfg,
             tag: tag.to_string(),
             fs: Some(fs),
+            server: None,
             queue_sizes: vec![QUEUE_SIZE; num_queues].into_boxed_slice(),
             avail_features: base_features,
             acked_features: 0,
             use_dax,
             pci_bar: None,
             tube: Some(tube),
+            socket: None,
             workers: Vec::with_capacity(num_workers + 1),
         })
     }
@@ -219,38 +225,75 @@ impl VirtioDevice for Fs {
         _interrupt: Interrupt,
         queues: BTreeMap<usize, Queue>,
     ) -> anyhow::Result<()> {
-        if queues.len() != self.queue_sizes.len() {
+        if queues.is_empty() || queues.len() > self.queue_sizes.len() {
             return Err(anyhow!(
-                "expected {} queues, got {}",
+                "expected 1..={} queues, got {}",
                 self.queue_sizes.len(),
                 queues.len()
             ));
         }
 
-        let fs = self.fs.take().expect("missing file system implementation");
+        let server = if let Some(server) = &self.server {
+            Arc::clone(server)
+        } else {
+            let fs = self
+                .fs
+                .take()
+                .ok_or_else(|| anyhow!("missing file system implementation"))?;
+            let server = Arc::new(Server::new(fs));
+            self.server = Some(Arc::clone(&server));
+            server
+        };
 
-        let server = Arc::new(Server::new(fs));
-        let socket = self.tube.take().expect("missing mapping socket");
+        let socket = if let Some(socket) = &self.socket {
+            Arc::clone(socket)
+        } else {
+            let socket = self
+                .tube
+                .take()
+                .ok_or_else(|| anyhow!("missing mapping socket"))?;
+            socket
+                .set_send_timeout(Some(Duration::from_millis(100)))
+                .map_err(|e| anyhow!("failed to set mapping send timeout: {e}"))?;
+            socket
+                .set_recv_timeout(Some(Duration::from_millis(100)))
+                .map_err(|e| anyhow!("failed to set mapping recv timeout: {e}"))?;
+            let socket = Arc::new(Mutex::new(socket));
+            self.socket = Some(Arc::clone(&socket));
+            socket
+        };
+
         let mut slot = 0;
 
         // Set up shared memory for DAX.
         if let Some(pci_bar) = self.pci_bar {
             // Create the shared memory region now before we start processing requests.
             let request = FsMappingRequest::AllocateSharedMemoryRegion(pci_bar);
-            socket
-                .send(&request)
-                .expect("failed to send allocation message");
-            slot = match socket.recv() {
-                Ok(VmResponse::RegisterMemory { slot }) => slot,
-                Ok(VmResponse::Err(e)) => panic!("failed to allocate shared memory region: {}", e),
-                r => panic!(
-                    "unexpected response to allocate shared memory region: {:?}",
-                    r
-                ),
+            {
+                let socket = socket.lock();
+                socket
+                    .send(&request)
+                    .map_err(|e| anyhow!("failed to send allocation message: {e}"))?;
+                slot = match socket.recv() {
+                    Ok(VmResponse::RegisterMemory { slot }) => slot,
+                    Ok(VmResponse::Err(e)) => {
+                        return Err(anyhow!("failed to allocate shared memory region: {}", e));
+                    }
+                    Ok(r) => {
+                        return Err(anyhow!(
+                            "unexpected response to allocate shared memory region: {:?}",
+                            r
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "failed to receive allocation response: {}",
+                            e
+                        ));
+                    }
+                };
             };
         }
-
-        let socket = Arc::new(Mutex::new(socket));
 
         self.workers = queues
             .into_iter()
@@ -264,6 +307,14 @@ impl VirtioDevice for Fs {
                 })
             })
             .collect();
+        Ok(())
+    }
+
+    fn reset(&mut self) -> anyhow::Result<()> {
+        info!("device reset requested");
+        for worker in self.workers.drain(..) {
+            let _ = worker.stop();
+        }
         Ok(())
     }
 
