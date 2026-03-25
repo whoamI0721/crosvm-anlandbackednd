@@ -571,13 +571,26 @@ impl GpuDisplay {
     pub fn dispatch_events(&mut self) -> GpuDisplayResult<()> {
         let wait_events = self.wait_ctx.wait_timeout(Duration::default())?;
 
-        if let Some(wait_event) = wait_events.iter().find(|e| e.is_hungup) {
-            base::error!(
-                "Display signaled with a hungup event for token {:?}",
-                wait_event.token
-            );
-            self.wait_ctx = WaitContext::new().unwrap();
-            return GpuDisplayResult::Err(GpuDisplayError::ConnectionBroken);
+        for wait_event in wait_events.iter().filter(|e| e.is_hungup) {
+            match wait_event.token {
+                DisplayEventToken::Display => {
+                    base::error!(
+                        "Display signaled with a hungup event for token {:?}",
+                        wait_event.token
+                    );
+                    self.wait_ctx = WaitContext::new().unwrap();
+                    return GpuDisplayResult::Err(GpuDisplayError::ConnectionBroken);
+                }
+                DisplayEventToken::EventDevice { event_device_id } => {
+                    base::info!(
+                        "Event device {} hungup, removing from display",
+                        event_device_id
+                    );
+                    if let Some(event_device) = self.event_devices.remove(&event_device_id) {
+                        let _ = self.wait_ctx.delete(&event_device);
+                    }
+                }
+            }
         }
 
         for wait_event in wait_events.iter().filter(|e| e.is_writable) {
