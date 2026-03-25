@@ -6,6 +6,7 @@ use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io;
+use std::io::ErrorKind;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use base::EventToken;
 use base::Protection;
 use base::SafeDescriptor;
 use base::Tube;
+use base::TubeError;
 use base::WaitContext;
 use fuse::filesystem::FileSystem;
 use fuse::filesystem::ZeroCopyReader;
@@ -78,14 +80,24 @@ impl Mapper {
             io::Error::from_raw_os_error(libc::EINVAL)
         })?;
 
-        match tube.recv() {
-            Ok(VmResponse::Ok) => Ok(()),
-            Ok(VmResponse::Err(e)) => Err(e.into()),
-            r => {
-                error!("failed to process {:?}: {:?}", request, r);
-                Err(io::Error::from_raw_os_error(libc::EIO))
+        for _ in 0..5 {
+            match tube.recv() {
+                Ok(VmResponse::Ok) => return Ok(()),
+                Ok(VmResponse::Err(e)) => return Err(e.into()),
+                Err(TubeError::Recv(e))
+                    if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock =>
+                {
+                    continue;
+                }
+                r => {
+                    error!("failed to process {:?}: {:?}", request, r);
+                    return Err(io::Error::from_raw_os_error(libc::EIO));
+                }
             }
         }
+
+        error!("timed out waiting for mapping response for {:?}", request);
+        Err(io::Error::from_raw_os_error(libc::ETIMEDOUT))
     }
 }
 
