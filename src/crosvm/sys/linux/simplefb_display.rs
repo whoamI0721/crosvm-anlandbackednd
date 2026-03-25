@@ -100,7 +100,14 @@ fn simplefb_display_loop(
 
         // Process any pending VNC input events and route to EventDevices.
         if let Err(e) = display.dispatch_events() {
-            error!("simplefb: dispatch_events error: {:?}", e);
+            match e {
+                gpu_display::GpuDisplayError::ConnectionBroken => {
+                    info!("simplefb: display connection closed, exiting");
+                }
+                _ => {
+                    error!("simplefb: dispatch_events error: {:?}", e);
+                }
+            }
             break;
         }
 
@@ -108,7 +115,7 @@ fn simplefb_display_loop(
             .read_exact_at_addr(&mut read_buf, guest_addr)
             .is_err()
         {
-            error!("simplefb: failed to read guest memory at {:#x}", params.addr);
+            info!("simplefb: guest memory no longer readable, exiting");
             break;
         }
 
