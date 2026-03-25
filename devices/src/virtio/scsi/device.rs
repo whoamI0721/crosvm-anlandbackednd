@@ -639,7 +639,12 @@ impl VirtioDevice for Controller {
         // 1st virtqueue is the eventq.
         // We do not send any events through eventq.
         let _eventq = queues.remove(&1).context("eventq should be present")?;
-        let targets = self.targets.take().context("failed to take SCSI targets")?;
+        let targets = self
+            .targets
+            .as_ref()
+            .context("failed to get SCSI targets")?
+            .try_clone()
+            .context("failed to clone SCSI targets")?;
         let target_ids = targets.target_ids();
         let sense_size = self.sense_size;
         let cdb_size = self.cdb_size;
@@ -711,6 +716,13 @@ impl VirtioDevice for Controller {
                     }
                 });
             self.worker_threads.push(worker_thread);
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) -> anyhow::Result<()> {
+        for worker in self.worker_threads.drain(..) {
+            let _ = worker.stop();
         }
         Ok(())
     }
@@ -946,6 +958,7 @@ mod tests {
                     max_lba: 0x1000,
                     block_size,
                     read_only: false,
+                    device_type: ScsiDeviceType::Disk,
                     disk_image,
                 };
                 (i as TargetId, logical_unit)
