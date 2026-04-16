@@ -37,7 +37,7 @@ pub(crate) fn start_device(command: DeviceSubcommand) -> anyhow::Result<()> {
 // otherwise.
 fn wait_all_children() -> bool {
     const CHILD_WAIT_MAX_ITER: isize = 100;
-    const CHILD_WAIT_MS: u64 = 10;
+    const CHILD_WAIT_MS: u64 = 100;
     for _ in 0..CHILD_WAIT_MAX_ITER {
         loop {
             match reap_child() {
@@ -67,11 +67,7 @@ pub(crate) fn cleanup() {
     // take some time for the processes to shut down.
     if !wait_all_children() {
         // We gave them a chance, and it's too late.
-        warn!("not all child processes have exited; sending SIGKILL");
-        if let Err(e) = kill_process_group() {
-            // We're now at the mercy of the OS to clean up after us.
-            warn!("unable to kill all child processes: {}", e);
-        }
+        warn!("not all child processes have exited");
     }
 }
 
