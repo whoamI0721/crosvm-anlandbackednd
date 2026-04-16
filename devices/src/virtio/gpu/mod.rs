@@ -451,7 +451,7 @@ impl Frontend {
                 None,
             ),
             GpuCommand::ResourceFlush(info) => {
-                self.virtio_gpu.flush_resource(info.resource_id.to_native())
+                self.virtio_gpu.flush_resource(info.resource_id.to_native(), mem)
             }
             GpuCommand::TransferToHost2d(info) => {
                 let resource_id = info.resource_id.to_native();
@@ -494,6 +494,7 @@ impl Frontend {
                 info.pos.scanout_id.to_native(),
                 info.pos.x.into(),
                 info.pos.y.into(),
+                mem,
             ),
             GpuCommand::MoveCursor(info) => self.virtio_gpu.move_cursor(
                 info.pos.scanout_id.to_native(),
@@ -734,10 +735,20 @@ impl Frontend {
             Ok(gpu_response) => gpu_response,
             Err(gpu_response) => {
                 if let Some(gpu_cmd) = gpu_cmd {
-                    error!(
-                        "error processing gpu command {:?}: {:?}",
-                        gpu_cmd, gpu_response
-                    );
+                    match gpu_cmd {
+                        GpuCommand::CmdSubmit3d(_) => {
+                            debug!(
+                                "error processing gpu command {:?}: {:?}",
+                                gpu_cmd, gpu_response
+                            );
+                        }
+                        _ => {
+                            error!(
+                                "error processing gpu command {:?}: {:?}",
+                                gpu_cmd, gpu_response
+                            );
+                        }
+                    }
                 }
                 gpu_response
             }
@@ -881,6 +892,7 @@ struct WorkerActivateRequest {
 enum WorkerRequest {
     Activate(WorkerActivateRequest),
     Suspend,
+    Reset,
     Snapshot,
     Restore(WorkerSnapshot),
 }
@@ -1040,6 +1052,12 @@ impl Worker {
                         .send(response)
                         .expect("failed to send gpu worker response for snapshot");
                 }
+                WorkerRequest::Reset => {
+                    let response = self.on_reset().map(|_| WorkerResponse::Ok);
+                    self.response_sender
+                        .send(response)
+                        .expect("failed to send gpu worker response for reset");
+                }
                 WorkerRequest::Restore(snapshot) => {
                     let response = self.on_restore(snapshot).map(|_| WorkerResponse::Ok);
                     self.response_sender
@@ -1089,6 +1107,11 @@ impl Worker {
         };
 
         Ok(GpuDeactivationResources { queues })
+    }
+
+    fn on_reset(&mut self) -> anyhow::Result<()> {
+        self.state.virtio_gpu.reset_state();
+        Ok(())
     }
 
     fn on_snapshot(&mut self) -> anyhow::Result<WorkerSnapshot> {
@@ -2117,14 +2140,45 @@ impl VirtioDevice for Gpu {
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {
-        self.stop_worker_thread();
+        match self.worker_state {
+            WorkerState::Active => {
+                // Suspend the worker instead of destroying it so it can be re-activated
+                // (e.g. when the guest driver resets the device during UEFI→Linux transition).
+                if let (
+                    Some(worker_request_sender),
+                    Some(worker_response_receiver),
+                    Some(worker_suspend_evt),
+                ) = (
+                    &self.worker_request_sender,
+                    &self.worker_response_receiver,
+                    &self.worker_suspend_evt,
+                ) {
+                    let _ = worker_request_sender.send(WorkerRequest::Suspend);
+                    let _ = worker_suspend_evt.signal();
+                    let _ = worker_response_receiver.recv();
+                    let _ = worker_suspend_evt.reset();
+                    // Clear all GPU state (resources, scanouts) so the next driver
+                    // starts with a clean slate.
+                    let _ = worker_request_sender.send(WorkerRequest::Reset);
+                    let _ = worker_response_receiver.recv();
+                }
+                self.worker_state = WorkerState::Inactive;
+            }
+            WorkerState::Inactive => {
+                // Worker is already idle, nothing to do.
+            }
+            WorkerState::Error => {
+                // Worker is broken, fully tear it down.
+                self.stop_worker_thread();
+            }
+        }
         Ok(())
     }
 }
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        let _ = self.reset();
+        self.stop_worker_thread();
     }
 }
 

@@ -629,6 +629,9 @@ pub struct Config {
     /// enable the Memory Tagging Extension in the guest
     pub mte: bool,
     pub protection_type: ProtectionType,
+    /// run mTHP preparation (drop caches, enable mTHP, populate, MADV_COLLAPSE,
+    /// mlock, chunked LEND) on lend regions before VM start
+    pub prepare_lend_mthp: bool,
 }
 
 impl Default for Config {
@@ -637,6 +640,7 @@ impl Default for Config {
             #[cfg(target_arch = "aarch64")]
             mte: false,
             protection_type: ProtectionType::Unprotected,
+            prepare_lend_mthp: false,
         }
     }
 }

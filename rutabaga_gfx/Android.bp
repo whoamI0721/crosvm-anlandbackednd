@@ -37,13 +37,13 @@ rust_library {
     ],
     proc_macros: ["libremain"],
     static_libs: [
-        "libepoxy",
-        "libgfxstream_backend",
-        "libvirglrenderer",
     ],
     shared_libs: [
         "libc++",
         "libbase",
+        "libgfxstream_backend",
+        "libepoxy",
+        "libvirglrenderer",
     ],
     apex_available: ["com.android.virt"],
     cfgs: [
