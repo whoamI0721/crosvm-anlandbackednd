@@ -303,6 +303,8 @@ rust_test {
     },
     ld_flags: [
         "-Wl,--rpath,\\$$ORIGIN",
+        "-Wl,--rpath,\\$$ORIGIN/../lib",
+        "-Wl,--rpath,\\$$ORIGIN/../../lib",
         "-Wl,--rpath,\\$$ORIGIN/../../lib64",
     ],
 
