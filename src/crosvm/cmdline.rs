@@ -2017,6 +2017,13 @@ pub struct RunCommand {
     ///       (default: "0 <current egid> 1")
     pub pmem_ext2: Vec<PmemExt2Option>,
 
+    #[argh(switch)]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// run mTHP preparation on lend regions (drop caches, enable mTHP,
+    /// populate, MADV_COLLAPSE, mlock, chunked LEND)
+    pub prepare_lend_mthp: Option<bool>,
+
     #[cfg(feature = "process-invariants")]
     #[argh(option, arg_name = "PATH")]
     #[serde(skip)] // TODO(b/255223604)
@@ -2982,6 +2989,7 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.hugepages = cmd.hugepages.unwrap_or_default();
+        cfg.prepare_lend_mthp = cmd.prepare_lend_mthp.unwrap_or_default();
 
         // `cfg.hypervisor` may have been set by the deprecated `--kvm-device` option above.
         // TODO(b/274817652): remove this workaround when `--kvm-device` is removed.

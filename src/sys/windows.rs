@@ -2077,6 +2077,7 @@ fn setup_vm_components(cfg: &Config) -> Result<VmComponents> {
         hugepages: cfg.hugepages,
         hv_cfg: hypervisor::Config {
             protection_type: cfg.protection_type,
+            prepare_lend_mthp: cfg.prepare_lend_mthp,
         },
         vm_image,
         android_fstab: cfg

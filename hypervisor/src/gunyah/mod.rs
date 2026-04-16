@@ -6,6 +6,7 @@
 mod aarch64;
 
 mod gunyah_sys;
+mod mthp;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
@@ -37,6 +38,7 @@ use base::RawDescriptor;
 use gunyah_sys::*;
 use libc::open;
 use libc::EFAULT;
+use libc::EEXIST;
 use libc::EINVAL;
 use libc::EIO;
 use libc::ENOENT;
@@ -248,6 +250,8 @@ impl GunyahVm {
         // SAFETY:
         // Safe because we verify that ret is valid and we own the fd.
         let vm_descriptor = unsafe { SafeDescriptor::from_raw_descriptor(ret) };
+        // Slot counter for chunked LEND: starts after the last region index.
+        let mut next_lend_slot = guest_mem.num_regions() as usize;
         for region in guest_mem.regions() {
             let lend = if cfg.protection_type.isolates_memory() {
                 match region.options.purpose {
@@ -276,24 +280,68 @@ impl GunyahVm {
                         region.shm_offset,
                 )?;
             } else if lend {
-                unsafe {
-                    libc::madvise(
-                        region.host_addr as *mut libc::c_void,
-                        region.size,
-                        libc::MADV_HUGEPAGE,
-                    );
-                }
-                // SAFETY:
-                // Safe because the guest regions are guarnteed not to overlap.
-                unsafe {
-                    android_lend_user_memory_region(
-                        &vm_descriptor,
-                        region.index as MemSlot,
-                        false,
-                        region.guest_addr.offset(),
-                        region.size.try_into().unwrap(),
-                        region.host_addr as *mut u8,
-                    )?;
+                let region_size: u64 = region.size.try_into().unwrap();
+                let host_ptr = region.host_addr as *mut u8;
+                let guest_base = region.guest_addr.offset();
+
+                if cfg.prepare_lend_mthp {
+                    // Full mTHP preparation: drop caches, enable mTHP,
+                    // populate in batches, cascading MADV_COLLAPSE, mlock.
+                    // SAFETY: host_ptr is a valid mapping of region_size bytes.
+                    let prep = unsafe { mthp::prepare_lend_region(host_ptr, region_size) };
+
+                    let chunks = mthp::compute_lend_chunks(region_size, Some(&prep));
+                    if chunks.is_empty() {
+                        // Region small enough for a single LEND slot.
+                        // SAFETY: guest regions are guaranteed not to overlap.
+                        unsafe {
+                            android_lend_user_memory_region(
+                                &vm_descriptor,
+                                region.index as MemSlot,
+                                false,
+                                guest_base,
+                                region_size,
+                                host_ptr,
+                            )?;
+                        }
+                    } else {
+                        // Chunked LEND – each chunk gets its own slot.
+                        for (ci, chunk) in chunks.iter().enumerate() {
+                            let slot = if ci == 0 {
+                                region.index as MemSlot
+                            } else {
+                                next_lend_slot as MemSlot
+                            };
+                            if ci > 0 {
+                                next_lend_slot += 1;
+                            }
+                            // SAFETY: chunks are non-overlapping sub-ranges
+                            // within a single guest region.
+                            unsafe {
+                                android_lend_user_memory_region(
+                                    &vm_descriptor,
+                                    slot,
+                                    false,
+                                    guest_base + chunk.offset,
+                                    chunk.size,
+                                    host_ptr.add(chunk.offset as usize),
+                                )?;
+                            }
+                        }
+                    }
+                } else {
+                    // No mTHP preparation – simple single-slot LEND.
+                    // SAFETY: guest regions are guaranteed not to overlap.
+                    unsafe {
+                        android_lend_user_memory_region(
+                            &vm_descriptor,
+                            region.index as MemSlot,
+                            false,
+                            guest_base,
+                            region_size,
+                            host_ptr,
+                        )?;
+                    }
                 }
             } else {
                 // SAFETY:
@@ -639,6 +687,33 @@ impl Vm for GunyahVm {
             )
         };
 
+        let res = if let Err(ref e) = res {
+            if e.errno() == EEXIST {
+                warn!(
+                    "Gunyah set_user_memory_region failed with EEXIST for slot {} \
+                     at GPA 0x{:x} size 0x{:x}, trying android_lend fallback",
+                    slot,
+                    guest_addr.offset(),
+                    size,
+                );
+                // SAFETY: safe because memory is not modified and the return value is checked.
+                unsafe {
+                    android_lend_user_memory_region(
+                        &self.vm,
+                        slot,
+                        read_only,
+                        guest_addr.offset(),
+                        size,
+                        mem_region.as_ptr(),
+                    )
+                }
+            } else {
+                res
+            }
+        } else {
+            res
+        };
+
         if let Err(e) = res {
             gaps.push(Reverse(slot));
             return Err(e);
@@ -677,8 +752,30 @@ impl Vm for GunyahVm {
         Err(Error::new(ENOTSUP))
     }
 
-    fn remove_memory_region(&mut self, _slot: MemSlot) -> Result<Box<dyn MappedRegion>> {
-        unimplemented!()
+    fn remove_memory_region(&mut self, slot: MemSlot) -> Result<Box<dyn MappedRegion>> {
+        let mut regions = self.mem_regions.lock();
+        let guest_addr = match regions.get(&slot) {
+            Some((_, addr)) => addr.offset(),
+            None => return Err(Error::new(ENOENT)),
+        };
+        // SAFETY:
+        // Safe because the slot is checked against the list of memory slots.
+        // Passing memory_size=0 signals the hypervisor to remove the region.
+        let res = unsafe {
+            set_user_memory_region(
+                &self.vm,
+                slot,
+                false,
+                guest_addr,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if let Err(e) = res {
+            warn!("Gunyah remove_memory_region ioctl failed for slot {}: {}", slot, e);
+        }
+        self.mem_slot_gaps.lock().push(Reverse(slot));
+        Ok(regions.remove(&slot).unwrap().0)
     }
 
     fn create_device(&self, _kind: DeviceKind) -> Result<SafeDescriptor> {
