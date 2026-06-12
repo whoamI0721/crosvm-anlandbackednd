@@ -77,7 +77,11 @@ impl EventDevice {
     /// empty.
     pub fn flush_buffered_events(&mut self) -> io::Result<bool> {
         while !self.event_buffer.is_empty() {
-            let written = self.event_socket.write(self.event_buffer.as_slices().0)?;
+            let written = match self.event_socket.write(self.event_buffer.as_slices().0) {
+                Ok(written) => written,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) => return Err(e),
+            };
             if written == 0 {
                 return Ok(false);
             }
@@ -135,7 +139,11 @@ impl EventDevice {
         }
 
         let bytes = event.as_bytes();
-        let written = self.event_socket.write(bytes)?;
+        let written = match self.event_socket.write(bytes) {
+            Ok(written) => written,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+            Err(e) => return Err(e),
+        };
 
         if written == bytes.len() {
             return Ok(true);

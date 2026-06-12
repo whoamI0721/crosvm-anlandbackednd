@@ -103,12 +103,19 @@ fn simplefb_display_loop(
             match e {
                 gpu_display::GpuDisplayError::ConnectionBroken => {
                     info!("simplefb: display connection closed, exiting");
+                    break;
+                }
+                gpu_display::GpuDisplayError::IoError(ref ioe)
+                    if ioe.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    // Nonblocking input/event sockets may transiently return EAGAIN.
+                    // This is not fatal; just retry on the next frame.
                 }
                 _ => {
                     error!("simplefb: dispatch_events error: {:?}", e);
+                    break;
                 }
             }
-            break;
         }
 
         if guest_mem
