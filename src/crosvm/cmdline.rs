@@ -60,6 +60,7 @@ use devices::SerialParameters;
 use devices::StubPciParameters;
 #[cfg(target_arch = "x86_64")]
 use hypervisor::CpuHybridType;
+use hypervisor::LendMthpMode;
 use hypervisor::ProtectionType;
 use merge::vec::append;
 use resources::AddressRange;
@@ -2021,8 +2022,20 @@ pub struct RunCommand {
     #[serde(skip)]
     #[merge(strategy = overwrite_option)]
     /// run mTHP preparation on lend regions (drop caches, enable mTHP,
-    /// populate, MADV_COLLAPSE, mlock, chunked LEND)
+    /// populate, MADV_COLLAPSE, mlock, chunked LEND).
+    /// Deprecated: equivalent to `--prepare-lend-mthp-mode chunked`; use that
+    /// option to select the LEND strategy
     pub prepare_lend_mthp: Option<bool>,
+
+    #[argh(option, arg_name = "single|chunked")]
+    #[serde(skip)]
+    #[merge(strategy = overwrite_option)]
+    /// run mTHP preparation on lend regions (drop caches, enable mTHP,
+    /// populate, MADV_COLLAPSE, mlock), then LEND the prepared region as a
+    /// single parcel ("single", for eager-parcel kernels such as sm8650) or
+    /// split into <=256MB parcels ("chunked", for demand-paging kernels such
+    /// as sm8750). Takes precedence over the deprecated `--prepare-lend-mthp`
+    pub prepare_lend_mthp_mode: Option<LendMthpMode>,
 
     #[cfg(feature = "process-invariants")]
     #[argh(option, arg_name = "PATH")]
@@ -2989,7 +3002,14 @@ impl TryFrom<RunCommand> for super::config::Config {
         }
 
         cfg.hugepages = cmd.hugepages.unwrap_or_default();
-        cfg.prepare_lend_mthp = cmd.prepare_lend_mthp.unwrap_or_default();
+        // The new `--prepare-lend-mthp-mode` selects the LEND strategy. The old
+        // boolean `--prepare-lend-mthp` switch is kept for backward
+        // compatibility and maps to the previous behavior (chunked LEND).
+        cfg.prepare_lend_mthp = cmd.prepare_lend_mthp_mode.or_else(|| {
+            cmd.prepare_lend_mthp
+                .unwrap_or_default()
+                .then_some(LendMthpMode::Chunked)
+        });
 
         // `cfg.hypervisor` may have been set by the deprecated `--kvm-device` option above.
         // TODO(b/274817652): remove this workaround when `--kvm-device` is removed.

@@ -623,15 +623,46 @@ impl ProtectionType {
     }
 }
 
+/// How an mTHP-prepared lend region is handed to Gunyah at VM start.
+///
+/// Both modes first run the same mTHP preparation (drop caches, enable mTHP,
+/// populate, cascading MADV_COLLAPSE, mlock). They differ only in how the
+/// prepared region is LENT to the hypervisor:
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LendMthpMode {
+    /// LEND the whole region as a single memory parcel. Required on the eager
+    /// per-region parcel kernel model (e.g. sm8650 / mainline gunyah), where
+    /// many parcels exhaust the RM per-VM memextent pool (NORESOURCE -> ENODEV).
+    Single,
+    /// Split the LEND into <=256MB chunks, one parcel each. For the demand-paging
+    /// binding kernel model (e.g. sm8750) where extra parcels are cheap.
+    Chunked,
+}
+
+impl std::str::FromStr for LendMthpMode {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "single" => Ok(LendMthpMode::Single),
+            "chunked" => Ok(LendMthpMode::Chunked),
+            _ => Err(format!(
+                "invalid prepare-lend-mthp mode '{s}', expected 'single' or 'chunked'"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Config {
     #[cfg(target_arch = "aarch64")]
     /// enable the Memory Tagging Extension in the guest
     pub mte: bool,
     pub protection_type: ProtectionType,
-    /// run mTHP preparation (drop caches, enable mTHP, populate, MADV_COLLAPSE,
-    /// mlock, chunked LEND) on lend regions before VM start
-    pub prepare_lend_mthp: bool,
+    /// Run mTHP preparation (drop caches, enable mTHP, populate, MADV_COLLAPSE,
+    /// mlock) on lend regions before VM start. The mode selects single-parcel
+    /// vs chunked LEND of the prepared region. `None` disables mTHP preparation.
+    pub prepare_lend_mthp: Option<LendMthpMode>,
 }
 
 impl Default for Config {
@@ -640,7 +671,7 @@ impl Default for Config {
             #[cfg(target_arch = "aarch64")]
             mte: false,
             protection_type: ProtectionType::Unprotected,
-            prepare_lend_mthp: false,
+            prepare_lend_mthp: None,
         }
     }
 }

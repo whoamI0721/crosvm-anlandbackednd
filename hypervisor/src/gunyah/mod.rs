@@ -284,13 +284,23 @@ impl GunyahVm {
                 let host_ptr = region.host_addr as *mut u8;
                 let guest_base = region.guest_addr.offset();
 
-                if cfg.prepare_lend_mthp {
+                if let Some(mthp_mode) = cfg.prepare_lend_mthp {
                     // Full mTHP preparation: drop caches, enable mTHP,
                     // populate in batches, cascading MADV_COLLAPSE, mlock.
                     // SAFETY: host_ptr is a valid mapping of region_size bytes.
                     let prep = unsafe { mthp::prepare_lend_region(host_ptr, region_size) };
 
-                    let chunks = mthp::compute_lend_chunks(region_size, Some(&prep));
+                    let chunks = match mthp_mode {
+                        // Single-parcel: keep the whole prepared region in one
+                        // LEND (eager-parcel kernels, e.g. sm8650, would hit
+                        // RM NORESOURCE if split into many parcels).
+                        LendMthpMode::Single => Vec::new(),
+                        // Chunked: split into <=256MB parcels (demand-paging
+                        // kernels, e.g. sm8750).
+                        LendMthpMode::Chunked => {
+                            mthp::compute_lend_chunks(region_size, Some(&prep))
+                        }
+                    };
                     if chunks.is_empty() {
                         // Region small enough for a single LEND slot.
                         // SAFETY: guest regions are guaranteed not to overlap.
