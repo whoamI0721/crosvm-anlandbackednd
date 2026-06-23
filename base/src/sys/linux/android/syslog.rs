@@ -21,6 +21,14 @@ use crate::syslog::Log;
 use crate::syslog::Syslog;
 use crate::RawDescriptor;
 
+// liblog caches its logd socket fd inside the process. After fork(2) the cached
+// fd is no longer valid (minijail closes fds not in keep_rds) but liblog has no
+// way to know that — the next log call would writev() into whatever the fd
+// number now points to (commonly an eventfd allocated by the child).
+extern "C" {
+    fn __android_log_close();
+}
+
 pub struct PlatformSyslog {
     proc_name: String,
 }
@@ -31,6 +39,12 @@ impl Syslog for PlatformSyslog {
         _facility: Facility,
     ) -> Result<(Option<Box<dyn Log + Send>>, Option<RawDescriptor>), Error> {
         Ok((Some(Box::new(Self { proc_name })), None))
+    }
+
+    fn after_fork_in_child() {
+        // SAFETY: __android_log_close has no arguments and is documented to be
+        // safe to call from any thread at any time.
+        unsafe { __android_log_close() };
     }
 }
 

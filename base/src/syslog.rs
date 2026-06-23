@@ -176,6 +176,11 @@ pub(crate) trait Syslog {
         proc_name: String,
         facility: Facility,
     ) -> Result<(Option<Box<dyn Log + Send>>, Option<RawDescriptor>), Error>;
+
+    /// Hook to invalidate any per-process logging state cached by the platform
+    /// (e.g. liblog's logd socket fd on Android, libc's syslog fd) after a
+    /// fork. Safe to call from the forked child before any other code runs.
+    fn after_fork_in_child() {}
 }
 
 pub struct State {
@@ -352,6 +357,18 @@ static EARLY_INIT_CALLED: Mutex<bool> = Mutex::new(false);
 /// Use `init_with_filter` to initialize with filtering
 pub fn init() -> Result<(), Error> {
     init_with(Default::default())
+}
+
+/// Invalidate per-process logging state that was inherited across `fork(2)`.
+///
+/// Must be called from the forked child before any logging happens. Some
+/// platform loggers (notably Android's `liblog`) keep a process-global fd cache
+/// that becomes a dangling reference after fork — and if minijail/keep_rds
+/// recycles that fd number for something else (an eventfd, a tube, …) the next
+/// log call writes into the wrong file. Call this hook to drop the cache so
+/// the next log call reconnects cleanly.
+pub fn after_fork_in_child() {
+    PlatformSyslog::after_fork_in_child();
 }
 
 /// Initialize the syslog connection and internal variables.

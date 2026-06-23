@@ -108,6 +108,14 @@ impl Syslog for PlatformSyslog {
         builder.is_test(true);
         Ok((Some(Box::new(builder.build())), Some(fd)))
     }
+
+    fn after_fork_in_child() {
+        // SAFETY: closelog takes no arguments and is safe to call from any
+        // thread. After fork() the syslog fd was closed by minijail; tell libc
+        // to drop its cached state so a future log call reconnects instead of
+        // writing to whatever the recycled fd number now points to.
+        unsafe { libc::closelog() };
+    }
 }
 
 // Uses libc's openlog function to get a socket to the syslogger. By getting the socket this way, as
