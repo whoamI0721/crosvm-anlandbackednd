@@ -54,6 +54,7 @@ use devices::PflashParameters;
 use devices::StubPciParameters;
 #[cfg(target_arch = "x86_64")]
 use hypervisor::CpuHybridType;
+use hypervisor::LendMthpMode;
 use hypervisor::ProtectionType;
 use jail::JailConfig;
 use resources::AddressRange;
@@ -783,7 +784,7 @@ pub struct Config {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub pmem_ext2: Vec<crate::crosvm::sys::config::PmemExt2Option>,
     pub pmems: Vec<PmemOption>,
-    pub prepare_lend_mthp: bool,
+    pub prepare_lend_mthp: Option<LendMthpMode>,
     #[cfg(feature = "process-invariants")]
     pub process_invariants_data_handle: Option<u64>,
     #[cfg(feature = "process-invariants")]
@@ -952,7 +953,7 @@ impl Default for Config {
             fdt_position: None,
             file_backed_mappings_mmio: Vec::new(),
             file_backed_mappings_ram: Vec::new(),
-            prepare_lend_mthp: false,
+            prepare_lend_mthp: None,
             force_calibrated_tsc_leaf: false,
             force_s2idle: false,
             fw_cfg_parameters: Vec::new(),

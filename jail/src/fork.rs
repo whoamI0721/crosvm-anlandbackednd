@@ -110,6 +110,14 @@ where
             // Prevents a panic in post_fork_cb from bypassing the process::exit.
             let _exit_guard = ExitGuard {};
 
+            // Drop any per-process logger state inherited from the parent (e.g.
+            // Android liblog's cached logd socket fd). minijail just closed
+            // every fd not in keep_rds, so that cached fd is now either invalid
+            // or — worse — has been recycled by a later allocation (eventfd,
+            // tube, …) in this child, which would make the next log call
+            // writev() into the wrong file.
+            base::syslog::after_fork_in_child();
+
             if let Some(debug_label) = debug_label {
                 // pthread_setname_np() limit on Linux
                 const MAX_THREAD_LABEL_LEN: usize = 15;
