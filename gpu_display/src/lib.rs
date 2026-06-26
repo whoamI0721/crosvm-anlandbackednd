@@ -185,6 +185,10 @@ impl<'a> GpuDisplayFramebuffer<'a> {
         width: u32,
         height: u32,
     ) -> Option<GpuDisplayFramebuffer<'a>> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+
         let x_byte_offset = x.checked_mul(self.bytes_per_pixel)?;
         let y_byte_offset = y.checked_mul(self.stride)?;
         let byte_offset = x_byte_offset.checked_add(y_byte_offset)?;
@@ -197,7 +201,7 @@ impl<'a> GpuDisplayFramebuffer<'a> {
         let slice = self
             .framebuffer
             .sub_slice(byte_offset as usize, count as usize)
-            .unwrap();
+            .ok()?;
 
         Some(GpuDisplayFramebuffer { slice, ..*self })
     }
