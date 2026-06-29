@@ -22,6 +22,7 @@ pub mod irqchip;
 mod pci;
 mod pflash;
 pub mod pl030;
+pub mod pl061;
 pub mod pmc_virt;
 mod serial;
 pub mod serial_device;

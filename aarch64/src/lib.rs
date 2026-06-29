@@ -153,6 +153,14 @@ const AARCH64_VMWDT_ADDR: u64 = 0x3000;
 // The virtual watchdog device gets one 4k page
 const AARCH64_VMWDT_SIZE: u64 = 0x1000;
 
+// Place the PL061 GPIO controller (power/sleep button) at page 4
+const AARCH64_GPIO_ADDR: u64 = 0x4000;
+// The GPIO controller gets one 4k page
+const AARCH64_GPIO_SIZE: u64 = 0x1000;
+// The GPIO controller uses a fixed high SPI (like the vmwdt) so it does not
+// collide with the dynamically allocated virtio interrupts.
+const AARCH64_GPIO_IRQ: u32 = 14;
+
 // Default PCI MMIO configuration region base address.
 const AARCH64_PCI_CAM_BASE_DEFAULT: u64 = 0x10000;
 // Default PCIe ECAM MMIO configuration region size.
@@ -318,6 +326,8 @@ pub enum Error {
     CreateGICFailure(base::Error),
     #[error("failed to create a PCI root hub: {0}")]
     CreatePciRoot(arch::DeviceRegistrationError),
+    #[error("failed to create PL061 GPIO device: {0}")]
+    CreatePl061Device(anyhow::Error),
     #[error("failed to create platform bus: {0}")]
     CreatePlatformBus(arch::DeviceRegistrationError),
     #[error("unable to create serial devices: {0}")]
@@ -849,7 +859,7 @@ impl arch::LinuxArch for AArch64 {
         pid_debug_label_map.append(&mut platform_pid_debug_label_map);
 
         let (vmwdt_host_tube, vmwdt_control_tube) = Tube::pair().map_err(Error::CreateTube)?;
-        Self::add_arch_devs(
+        let pm = Self::add_arch_devs(
             irq_chip.as_irq_chip_mut(),
             &mmio_bus,
             vcpu_count,
@@ -1154,7 +1164,7 @@ impl arch::LinuxArch for AArch64 {
             delay_rt: components.delay_rt,
             bat_control,
             simplefb_shm: None,
-            pm: None,
+            pm: Some(pm),
             resume_notify_devices: Vec::new(),
             root_config: pci_root,
             platform_devices,
@@ -1469,7 +1479,7 @@ impl AArch64 {
         vcpu_count: usize,
         vm_evt_wrtube: &SendTube,
         vmwdt_request_tube: Tube,
-    ) -> Result<()> {
+    ) -> Result<Arc<Mutex<devices::pl061::Pl061>>> {
         let rtc_evt = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
         let rtc = devices::pl030::Pl030::new(rtc_evt.try_clone().map_err(Error::CloneEvent)?);
         irq_chip
@@ -1506,7 +1516,25 @@ impl AArch64 {
         )
         .expect("failed to add vmwdt device");
 
-        Ok(())
+        // PL061 GPIO controller, used to deliver power/sleep button events to the
+        // guest's gpio-keys driver (aarch64 has no ACPI power management block).
+        // Uses an edge irqfd like the RTC and vmwdt; the Gunyah irqchip does not
+        // properly support level irqfds.
+        let gpio_evt = devices::IrqEdgeEvent::new().map_err(Error::CreateEvent)?;
+        let gpio = devices::pl061::Pl061::new(gpio_evt.try_clone().map_err(Error::CloneEvent)?)
+            .map_err(Error::CreatePl061Device)?;
+        let gpio = Arc::new(Mutex::new(gpio));
+        irq_chip
+            .register_edge_irq_event(
+                AARCH64_GPIO_IRQ,
+                &gpio_evt,
+                IrqEventSource::from_device(&*gpio.lock()),
+            )
+            .map_err(Error::RegisterIrqfd)?;
+        bus.insert(gpio.clone(), AARCH64_GPIO_ADDR, AARCH64_GPIO_SIZE)
+            .expect("failed to add gpio device");
+
+        Ok(gpio)
     }
 
     /// Get ARM-specific features for vcpu with index `vcpu_id`.
