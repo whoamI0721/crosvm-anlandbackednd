@@ -22,6 +22,9 @@ use cros_fdt::Result;
 // This is a Battery related constant
 use devices::bat::GOLDFISHBAT_MMIO_LEN;
 use devices::pl030::PL030_AMBA_ID;
+use devices::pl061::GPIO_PIN_POWER_BUTTON;
+use devices::pl061::GPIO_PIN_SLEEP_BUTTON;
+use devices::pl061::PL061_AMBA_ID;
 use devices::IommuDevType;
 use devices::PciAddress;
 use devices::PciInterruptPin;
@@ -43,6 +46,10 @@ use crate::AARCH64_GIC_DIST_SIZE;
 use crate::AARCH64_GIC_REDIST_SIZE;
 use crate::AARCH64_PMU_IRQ;
 use crate::AARCH64_PROTECTED_VM_FW_START;
+// These are GPIO (PL061) related constants
+use crate::AARCH64_GPIO_ADDR;
+use crate::AARCH64_GPIO_IRQ;
+use crate::AARCH64_GPIO_SIZE;
 // These are RTC related constants
 use crate::AARCH64_RTC_ADDR;
 use crate::AARCH64_RTC_IRQ;
@@ -60,6 +67,11 @@ use crate::AARCH64_VMWDT_IRQ;
 const PHANDLE_GIC: u32 = 1;
 const PHANDLE_RESTRICTED_DMA_POOL: u32 = 2;
 const PHANDLE_SIMPLEFB_RESERVED: u32 = 3;
+const PHANDLE_GPIO: u32 = 4;
+
+// Shared fixed clock (apb_pclk) for the AMBA PrimeCell devices (PL030 RTC and
+// PL061 GPIO).
+const PCLK_PHANDLE: u32 = 24;
 
 // CPUs are assigned phandles starting with this number.
 const PHANDLE_CPU0: u32 = 0x100;
@@ -562,13 +574,13 @@ fn create_rtc_node(fdt: &mut Fdt) -> Result<()> {
     // the kernel driver for pl030 really really wants a clock node
     // associated with an AMBA device or it will fail to probe, so we
     // need to make up a clock node to associate with the pl030 rtc
-    // node and an associated handle with a unique phandle value.
-    const CLK_PHANDLE: u32 = 24;
+    // node and an associated handle with a unique phandle value. The same
+    // clock is shared with the PL061 GPIO controller.
     let clock_node = fdt.root_mut().subnode_mut("pclk@3M")?;
     clock_node.set_prop("#clock-cells", 0u32)?;
     clock_node.set_prop("compatible", "fixed-clock")?;
     clock_node.set_prop("clock-frequency", 3141592u32)?;
-    clock_node.set_prop("phandle", CLK_PHANDLE)?;
+    clock_node.set_prop("phandle", PCLK_PHANDLE)?;
 
     let rtc_name = format!("rtc@{:x}", AARCH64_RTC_ADDR);
     let reg = [AARCH64_RTC_ADDR, AARCH64_RTC_SIZE];
@@ -579,8 +591,54 @@ fn create_rtc_node(fdt: &mut Fdt) -> Result<()> {
     rtc_node.set_prop("arm,primecell-periphid", PL030_AMBA_ID)?;
     rtc_node.set_prop("reg", &reg)?;
     rtc_node.set_prop("interrupts", &irq)?;
-    rtc_node.set_prop("clocks", CLK_PHANDLE)?;
+    rtc_node.set_prop("clocks", PCLK_PHANDLE)?;
     rtc_node.set_prop("clock-names", "apb_pclk")?;
+    Ok(())
+}
+
+/// Create a flattened device tree node for the PL061 GPIO controller along with
+/// a `gpio-keys` node that maps two of its lines to the power and sleep buttons.
+///
+/// The guest's `gpio-keys` driver obtains its interrupt from the PL061's gpio
+/// irqchip (via `gpiod_to_irq`), so the keys node only references the controller
+/// through its `gpios` property. This mirrors the QEMU `virt` machine.
+fn create_gpio_node(fdt: &mut Fdt) -> Result<()> {
+    // Linux input event codes (see include/uapi/linux/input-event-codes.h).
+    const KEY_POWER: u32 = 116;
+    const KEY_SLEEP: u32 = 142;
+
+    let gpio_name = format!("gpio@{:x}", AARCH64_GPIO_ADDR);
+    let reg = [AARCH64_GPIO_ADDR, AARCH64_GPIO_SIZE];
+    let irq = [GIC_FDT_IRQ_TYPE_SPI, AARCH64_GPIO_IRQ, IRQ_TYPE_LEVEL_HIGH];
+
+    let gpio_node = fdt.root_mut().subnode_mut(&gpio_name)?;
+    gpio_node.set_prop("compatible", &["arm,pl061", "arm,primecell"])?;
+    gpio_node.set_prop("arm,primecell-periphid", PL061_AMBA_ID)?;
+    gpio_node.set_prop("reg", &reg)?;
+    gpio_node.set_prop("interrupts", &irq)?;
+    gpio_node.set_prop("gpio-controller", ())?;
+    gpio_node.set_prop("#gpio-cells", 2u32)?;
+    gpio_node.set_prop("clocks", PCLK_PHANDLE)?;
+    gpio_node.set_prop("clock-names", "apb_pclk")?;
+    gpio_node.set_prop("phandle", PHANDLE_GPIO)?;
+
+    let keys_node = fdt.root_mut().subnode_mut("gpio-keys")?;
+    keys_node.set_prop("compatible", "gpio-keys")?;
+
+    let poweroff_node = keys_node.subnode_mut("poweroff")?;
+    poweroff_node.set_prop("label", "GPIO Key Poweroff")?;
+    poweroff_node.set_prop("linux,code", KEY_POWER)?;
+    poweroff_node.set_prop("gpios", &[PHANDLE_GPIO, GPIO_PIN_POWER_BUTTON, 0])?;
+    // Allow the power button to wake the guest from suspend (s2idle), matching
+    // crosvm's x86 behaviour where resume emulates a power-button press.
+    poweroff_node.set_prop("wakeup-source", ())?;
+
+    let suspend_node = keys_node.subnode_mut("suspend")?;
+    suspend_node.set_prop("label", "GPIO Key Suspend")?;
+    suspend_node.set_prop("linux,code", KEY_SLEEP)?;
+    suspend_node.set_prop("gpios", &[PHANDLE_GPIO, GPIO_PIN_SLEEP_BUTTON, 0])?;
+    suspend_node.set_prop("wakeup-source", ())?;
+
     Ok(())
 }
 
@@ -790,6 +848,7 @@ pub fn create_fdt(
     create_psci_node(&mut fdt, &psci_version)?;
     create_pci_nodes(&mut fdt, pci_irqs, pci_cfg, pci_ranges, dma_pool_phandle)?;
     create_rtc_node(&mut fdt)?;
+    create_gpio_node(&mut fdt)?;
     if let Some((bat_mmio_base, bat_irq)) = bat_mmio_base_and_irq {
         create_battery_node(&mut fdt, bat_mmio_base, bat_irq)?;
     }
