@@ -1997,20 +1997,9 @@ dependencies = [
 
 [[package]]
 name = "minijail"
-version = "0.2.3"
+version = "0.1.0"
 dependencies = [
  "libc",
- "minijail-sys",
-]
-
-[[package]]
-name = "minijail-sys"
-version = "0.0.14"
-dependencies = [
- "bindgen 0.63.0",
- "libc",
- "pkg-config",
- "which",
 ]
 
 [[package]]

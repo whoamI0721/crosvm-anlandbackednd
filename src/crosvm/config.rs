@@ -651,6 +651,8 @@ pub struct Config {
     #[cfg(feature = "android_display")]
     pub android_display_service: Option<String>,
     pub android_fstab: Option<PathBuf>,
+    #[cfg(feature = "anland")]
+    pub anland_socket: Option<String>,
     pub async_executor: Option<ExecutorKind>,
     #[cfg(feature = "balloon")]
     pub balloon: bool,
@@ -889,6 +891,8 @@ impl Default for Config {
             acpi_tables: Vec::new(),
             #[cfg(feature = "android_display")]
             android_display_service: None,
+            #[cfg(feature = "anland")]
+            anland_socket: None,
             android_fstab: None,
             async_executor: None,
             #[cfg(feature = "balloon")]

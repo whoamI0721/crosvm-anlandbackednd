@@ -1369,6 +1369,12 @@ pub enum DisplayBackend {
     /// Start a VNC server for remote display access.
     /// VncTcp(addr, width, height, password) listens on a TCP address.
     VncTcp(String, u32, u32, Option<String>),
+    #[cfg(feature = "anland")]
+    /// Use the anland backend: submit rendered dmabufs directly to the anland
+    /// consumer app via HardwareBuffer / ANativeWindow.  `socket_path` is the
+    /// Unix-domain socket where the anland daemon listens (default:
+    /// `/data/local/tmp/display_daemon.sock`).
+    Anland(String),
 }
 
 impl DisplayBackend {
@@ -1402,6 +1408,8 @@ impl DisplayBackend {
             DisplayBackend::VncTcp(addr, width, height, password) => {
                 GpuDisplay::open_vnc_tcp(addr, *width, *height, password.clone())
             }
+            #[cfg(feature = "anland")]
+            DisplayBackend::Anland(socket_path) => GpuDisplay::open_anland(socket_path),
         }
     }
 }

@@ -44,7 +44,7 @@ impl Worker {
             while writer.available_bytes() > 0 {
                 let chunk_size = writer.available_bytes().min(CHUNK_SIZE);
                 let chunk = &mut rand_bytes[..chunk_size];
-                let mut rng = rand::rng();
+                let mut rng = rand::rngs::OsRng;
                 rng.fill_bytes(chunk);
                 if let Err(e) = writer.write_all(chunk) {
                     warn!("Failed to write random data to the guest: {}", e);

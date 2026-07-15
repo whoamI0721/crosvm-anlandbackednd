@@ -997,6 +997,11 @@ pub struct RunCommand {
     /// path to Android fstab
     pub android_fstab: Option<PathBuf>,
 
+    #[cfg(feature = "anland")]
+    #[argh(option, long = "anland", arg_name = "SOCKET_PATH")]
+    /// path to anland daemon Unix socket for the anland display backend
+    pub anland_socket: Option<String>,
+
     /// configure async executor backend; "uring" or "epoll" on Linux, "handle" or "overlapped" on
     /// Windows. If this option is omitted on Linux, "epoll" is used by default.
     #[argh(option, arg_name = "EXECUTOR")]

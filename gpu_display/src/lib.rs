@@ -33,6 +33,10 @@ mod gpu_display_android;
 #[cfg(feature = "android_display_stub")]
 mod gpu_display_android_stub;
 mod gpu_display_stub;
+#[cfg(feature = "anland")]
+mod gpu_display_anland;
+#[cfg(feature = "anland")]
+pub use gpu_display_anland::DisplayAnland;
 #[cfg(feature = "vnc")]
 mod gpu_display_vnc;
 #[cfg(feature = "vnc")]
@@ -506,6 +510,22 @@ impl GpuDisplay {
         password: Option<String>,
     ) -> GpuDisplayResult<GpuDisplay> {
         let display = gpu_display_vnc::DisplayVnc::new_tcp(addr, width, height, password)?;
+
+        let wait_ctx = WaitContext::new()?;
+        wait_ctx.add(&display, DisplayEventToken::Display)?;
+
+        Ok(GpuDisplay {
+            inner: Box::new(display),
+            next_id: 1,
+            event_devices: Default::default(),
+            surfaces: Default::default(),
+            wait_ctx,
+        })
+    }
+
+    #[cfg(feature = "anland")]
+    pub fn open_anland(socket_path: &str) -> GpuDisplayResult<GpuDisplay> {
+        let display = gpu_display_anland::DisplayAnland::new(socket_path)?;
 
         let wait_ctx = WaitContext::new()?;
         wait_ctx.add(&display, DisplayEventToken::Display)?;

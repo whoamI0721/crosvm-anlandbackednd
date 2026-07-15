@@ -242,6 +242,10 @@ android_display_stub = ["devices/android_display_stub"]
 # Enables the VNC display backend for remote access to the VM display.
 vnc = ["devices/vnc", "gpu_display/vnc"]
 
+# Enables the anland display backend: submits rendered dmabufs directly to
+# the anland consumer app via HardwareBuffer / ANativeWindow.
+anland = ["devices/anland", "gpu_display/anland"]
+
 #! ### Video features
 #!
 #! See [Video Device](https://crosvm.dev/book/devices/video.html) for more information.
@@ -417,6 +421,7 @@ all-default = [
 
 ## All features that are compiled and tested for aarch64
 all-aarch64 = [
+    "anland",
     "audio_aaudio",
     "all-default",
     "android_display",
@@ -433,6 +438,7 @@ all-riscv64 = [
 
 ## All features that are compiled and tested for x86_64
 all-x86_64 = [
+    "anland",
     "audio_aaudio",
     "all-default",
     "android_display",

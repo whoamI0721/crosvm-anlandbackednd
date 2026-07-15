@@ -1,0 +1,99 @@
+name: Build crosvm with anland backend (Android)
+
+on:
+  push:
+    branches: [droidvm]
+  pull_request:
+    branches: [droidvm]
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: r29
+  ANDROID_API_LEVEL: 30
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-linux-android
+
+      - name: Install NDK
+        run: |
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
+          unzip -q "$NDK_ZIP" -d /tmp
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "/tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libwayland-dev wayland-protocols pkg-config
+
+      - name: Configure cargo for Android cross-compilation
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.aarch64-linux-android]
+          linker = "aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+          ar = "llvm-ar"
+          EOF
+
+      - name: Create minijail stubs
+        working-directory: third_party/minijail/rust/minijail
+        run: |
+          cat > Cargo.toml << 'CARGOEOF'
+          [package]
+          name = "minijail"
+          version = "0.1.0"
+          edition = "2021"
+          CARGOEOF
+          cat > src/lib.rs << 'RUSTEOF'
+          pub fn kill<T>(_pid: i32, _sig: i32) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn try_clone<T>() -> std::result::Result<Self, std::io::Error> { Err(std::io::Error::new(std::io::ErrorKind::Other, "stub")) }
+          pub struct Command {}
+          pub fn run_command<T>(_cmd: &Command, _fd: std::os::fd::RawFd) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn mount<T>(_src: &str, _dst: &str, _fs_type: &str, _flags: u64, _data: &str) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn mount_with_data<T>(_src: &str, _dst: &str, _fs_type: &str, _flags: u64, _data: &str) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn mount_bind<T>(_src: &str, _dst: &str, _writable: bool) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn log_seccomp_filter_failures<T>() {}
+          pub fn enter_pivot_root<T>(_path: &std::path::Path) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn fork<T>(&self) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          RUSTEOF
+
+      - name: Compile C bridge (libanland_display_bridge)
+        run: |
+          CLANG="aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+          SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          $CLANG -target aarch64-linux-android${ANDROID_API_LEVEL} \
+            -I"$SYSROOT/usr/include" \
+            -c gpu_display/src/anland_display_bridge.c \
+            -o /tmp/libanland_display_bridge.o
+          llvm-ar rcs /tmp/libanland_display_bridge.a /tmp/libanland_display_bridge.o
+
+      - name: Build crosvm with anland feature
+        env:
+          RUSTFLAGS: >
+            -C link-arg=/tmp/libanland_display_bridge.a
+            -L native=/tmp
+            -l native=nativewindow
+            -l native=nativehardwarebuffer
+        run: |
+          cargo build \
+            --target aarch64-linux-android \
+            --features anland \
+            --release
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosvm-anland-android
+          path: target/aarch64-linux-android/release/crosvm

@@ -16,6 +16,7 @@ android_display = []
 android_display_stub = []
 gfxstream = []
 vnc = []
+anland = []
 
 [dependencies]
 anyhow = "1"
