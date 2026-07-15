@@ -9,8 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # 修改点 1: 提升 API Level 以支持 AHardwareBuffer_Planes 和新版 ANativeWindow 接口
-  NDK_VERSION: r26b # 建议使用较稳定的 r26b 或保持 r29，这里保持你原来的逻辑，但需配合高 API
+  NDK_VERSION: r26b
   ANDROID_API_LEVEL: 34
 
 jobs:
@@ -28,14 +27,11 @@ jobs:
 
       - name: Install NDK
         run: |
-          # 使用 r26b 作为示例，因为它对 API 34 支持良好且稳定。如果你必须用 r29，请改回变量
-          NDK_ZIP="android-ndk-r26b-linux.zip"
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
           wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
           unzip -q "$NDK_ZIP" -d /tmp
-          # 注意：解压后的文件夹名可能不带版本号后缀，需根据实际情况调整，这里假设是标准命名
-          # 如果是 r29，文件名可能是 android-ndk-r29
-          echo "ANDROID_NDK_HOME=/tmp/android-ndk-r26b" >> $GITHUB_ENV
-          echo "/tmp/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "/tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: Install system deps
         run: |
@@ -47,74 +43,52 @@ jobs:
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [target.aarch64-linux-android]
-          linker = "aarch64-linux-android34-clang"
+          linker = "aarch64-linux-android${ANDROID_API_LEVEL}-clang"
           ar = "llvm-ar"
           EOF
 
       - name: Create minijail stubs
         working-directory: third_party/minijail/rust/minijail
         run: |
-          mkdir -p src
           cat > Cargo.toml << 'CARGOEOF'
           [package]
           name = "minijail"
           version = "0.1.0"
           edition = "2021"
           CARGOEOF
-          # 修改点 2: 修复 Rust 存根代码的语法错误
           cat > src/lib.rs << 'RUSTEOF'
-          pub fn kill(_pid: i32, _sig: i32) -> Result<(), std::io::Error> { Ok(()) }
-
-          // 修复 try_clone: 这是一个关联函数或方法，不能直接返回 Self 除非在 impl 块中
-          // 这里假设它是作为一个独立函数存在的桩，或者是 trait 的一部分。
-          // 为了通过编译，我们将其改为返回一个具体的 dummy 类型或简化处理。
-          // 如果原意是模仿 File::try_clone，这里简单返回 Err 即可。
-          pub fn try_clone() -> Result<(), std::io::Error> {
-              Err(std::io::Error::new(std::io::ErrorKind::Other, "stub"))
-          }
-
+          pub fn kill<T>(_pid: i32, _sig: i32) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn try_clone<T>() -> std::result::Result<(), std::io::Error> { Err(std::io::Error::new(std::io::ErrorKind::Other, "stub")) }
           pub struct Command {}
-
-          pub fn run_command(_cmd: &Command, _fd: std::os::fd::RawFd) -> Result<(), std::io::Error> { Ok(()) }
-
-          pub fn mount(_src: &str, _dst: &str, _fs_type: &str, _flags: u64, _data: &str) -> Result<(), std::io::Error> { Ok(()) }
-
-          pub fn mount_with_data(_src: &str, _dst: &str, _fs_type: &str, _flags: u64, _data: &str) -> Result<(), std::io::Error> { Ok(()) }
-
-          pub fn mount_bind(_src: &str, _dst: &str, _writable: bool) -> Result<(), std::io::Error> { Ok(()) }
-
-          pub fn log_seccomp_filter_failures() {}
-
-          pub fn enter_pivot_root(_path: &std::path::Path) -> Result<(), std::io::Error> { Ok(()) }
-
-          // 修复 fork: 自由函数不能有 &self 参数
-          pub fn fork() -> Result<(), std::io::Error> { Ok(()) }
+          pub fn run_command<T>(_cmd: &Command, _fd: std::os::fd::RawFd) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn mount<T>(_src: &str, _dst: &str, _fs_type: &str, _flags: u64, _data: &str) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn mount_with_data<T>(_src: &str, _dst: &str, _fs_type: &str, _flags: u64, _data: &str) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn mount_bind<T>(_src: &str, _dst: &str, _writable: bool) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn log_seccomp_filter_failures<T>() {}
+          pub fn enter_pivot_root<T>(_path: &std::path::Path) -> std::result::Result<(), std::io::Error> { Ok(()) }
+          pub fn fork<T>() -> std::result::Result<(), std::io::Error> { Ok(()) }
           RUSTEOF
 
       - name: Compile C bridge (libanland_display_bridge)
         run: |
           CLANG="aarch64-linux-android${ANDROID_API_LEVEL}-clang"
           SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-
-          # 修改点 3: 增加 -D__ANDROID_API__ 宏定义，确保头文件暴露正确的 API
-          # 增加 -landroid 链接标志，解决 ANativeWindow 相关符号未定义问题
           $CLANG -target aarch64-linux-android${ANDROID_API_LEVEL} \
             -D__ANDROID_API__=${ANDROID_API_LEVEL} \
             -I"$SYSROOT/usr/include" \
             -c gpu_display/src/anland_display_bridge.c \
             -o /tmp/libanland_display_bridge.o
-
           llvm-ar rcs /tmp/libanland_display_bridge.a /tmp/libanland_display_bridge.o
 
       - name: Build crosvm with anland feature
         env:
-          # 修改点 4: 补充链接库 -landroid
           RUSTFLAGS: >
             -C link-arg=/tmp/libanland_display_bridge.a
             -L native=/tmp
-            -l native=nativewindow
-            -l native=android
-            -l native=nativehardwarebuffer
+            -l android
+            -l nativewindow
+            -l EGL
+            -l GLESv3
         run: |
           cargo build \
             --target aarch64-linux-android \
