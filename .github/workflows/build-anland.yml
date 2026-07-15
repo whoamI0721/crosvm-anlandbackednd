@@ -54,19 +54,20 @@ jobs:
           use std::io;
           use std::os::fd::RawFd;
           use std::path::Path;
-          pub fn kill(pid: i32, sig: i32) -> io::Result<()> { Ok(()) }
-          pub fn try_clone() -> io::Result<Self> { Err(io::Error::new(io::ErrorKind::Other, "stub")) }
-          pub struct Command;
-          impl Command {
-              pub fn new<T: AsRef<std::ffi::OsStr>>(_p: T) -> Self { Command }
-              pub fn run_command(&self, _fd: RawFd) -> io::Result<()> { Ok(()) }
+          pub fn kill(_pid: i32, _sig: i32) -> io::Result<()> { Ok(()) }
+          pub struct Minijail;
+          impl Minijail {
+              pub fn new() -> Minijail { Minijail }
+              pub fn try_clone(&self) -> io::Result<Minijail> { Err(io::Error::new(io::ErrorKind::Other, "stub")) }
+              pub fn fork(&self) -> io::Result<()> { Ok(()) }
+              pub fn run_as_child(&self, _cmd: &std::process::Command, _fd: RawFd) -> io::Result<()> { Ok(()) }
+              pub fn enter_pivot_root(&self, _p: &Path) -> io::Result<()> { Ok(()) }
+              pub fn mount(&self, _s: &str, _d: &str, _f: &str, _fl: u64, _da: &str) -> io::Result<()> { Ok(()) }
+              pub fn mount_with_data(&self, _s: &str, _d: &str, _f: &str, _fl: u64, _da: &str) -> io::Result<()> { Ok(()) }
+              pub fn mount_bind(&self, _s: &str, _d: &str, _w: bool) -> io::Result<()> { Ok(()) }
+              pub fn kill(&self, _pid: i32, _sig: i32) -> io::Result<()> { Ok(()) }
+              pub fn log_seccomp_failure_for_failed_syscall(&self) {}
           }
-          pub fn mount(_s: &str, _d: &str, _f: &str, _fl: u64, _da: &str) -> io::Result<()> { Ok(()) }
-          pub fn mount_with_data(_s: &str, _d: &str, _f: &str, _fl: u64, _da: &str) -> io::Result<()> { Ok(()) }
-          pub fn mount_bind(_s: &str, _d: &str, _w: bool) -> io::Result<()> { Ok(()) }
-          pub fn log_seccomp_filter_failures() {}
-          pub fn enter_pivot_root(_p: &Path) -> io::Result<()> { Ok(()) }
-          pub fn fork(&self) -> io::Result<()> { Ok(()) }
           EOF
 
       - name: Build C bridge
